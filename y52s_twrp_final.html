@@ -400,6 +400,28 @@ privapp 权限、还引用 <code>frameworks/native/data/etc/...</code> 等 minim
 加 <code>mka</code> 缺失时回退 <code>make</code>、构建失败自动上传 <code>/mnt/build.log</code>。
 提交 <code>796a5b8</code> 已 push 到 <code>origin/main</code>（远端与本地一致），<strong>push 已自动触发新一轮构建</strong>。</div>
 
+<h3>9.1b 第二次运行复盘：编译成功但 job 仍失败（约 22:xx）</h3>
+<div class="cmd">[100% 16530/16530] build out/target/product/y52s/recovery.img
+#### build completed successfully (33:35 (mm:ss)) ####
+Error: Process completed with exit code 1.
+Run actions/upload-artifact@v4
+No files were found with the provided path: /mnt/build.log. No artifacts will be uploaded.</div>
+<p><strong>编译本身是成功的</strong>，33 分 35 秒、16530 个目标全部完成——这反证了 9.1 的修复（去掉 vendor/omni 依赖）是对的。
+失败发生在构建步骤的<strong>输出重定向</strong>：我给 <code>/mnt/twrp</code> 和 <code>/mnt/ccache</code> 做了 chown，
+但 <code>/mnt</code> 挂载点本身仍是 root 所有，<code>tee /mnt/build.log</code> 无法创建文件；
+配合 <code>set -o pipefail</code>，一次<strong>成功</strong>的构建被判成 exit 1，于是默认 <code>success()</code> 的
+<code>Upload recovery.img</code> 被整步跳过，runner 销毁后产物随之丢失。
+日志里「找不到 <code>/mnt/build.log</code>」正是这个判断的证据，而不是另一个独立故障。</p>
+<p><strong>修复（提交 <code>67ed70e</code>，已 push 并自动触发第三次构建）</strong>：</p>
+<ul>
+  <li>彻底去掉 <code>2&gt;&amp;1 | tee /mnt/build.log</code> 和 <code>pipefail</code>——GitHub 本来就记录 stdout，无需额外日志文件；</li>
+  <li>删除因此失效的 <code>Upload build log on failure</code> 步骤；</li>
+  <li><code>Verify the produced image</code> 设 <code>continue-on-error: true</code> 并把断言改成只打印警告，不再阻断后续；</li>
+  <li><strong><code>Upload recovery.img</code> 设 <code>if: always()</code> + <code>if-no-files-found: warn</code></strong>：只要 <code>recovery.img</code> 生成，即使前序步骤报错也一定上传。</li>
+</ul>
+<p>这次 runner 已销毁且 artifact 没上传，产物无法取回，只能重跑一次（sync + 33 分钟编译）。
+第三次运行只要再次出现 <code>build completed successfully</code>，artifact <code>y52s-twrp11-recovery</code> 就必然存在。</p>
+
 <h3>9.2 逐条步骤（A 段：等构建；B 段：我处理；C 段：你只在屏幕上输密码）</h3>
 <table>
   <tr><th>#</th><th>在哪 / 做什么</th><th>命令或操作</th><th>预期 / 失败时</th></tr>
@@ -409,8 +431,8 @@ privapp 权限、还引用 <code>frameworks/native/data/etc/...</code> 等 minim
   <tr><td>4</td><td>展开 <code>Assert product makefile needs no vendor/omni</code></td><td>无需操作</td><td><strong>必须输出 <code>OK: product makefile is self-contained</code></strong>；这就是本次修复的检查点</td></tr>
   <tr><td>5</td><td><code>repo sync</code></td><td>无需操作</td><td>约 30–60 分钟，<code>du -sh /mnt/twrp</code> 几十 G；GitHub 带宽，不占本机</td></tr>
   <tr><td>6</td><td><code>Build recoveryimage</code></td><td>无需操作</td><td>约 1–2 小时，末尾 <code>ls -lh out/target/product/y52s/recovery.img</code>；失败会自动产出 <code>y52s-build-log</code></td></tr>
-  <tr><td>7</td><td><code>Verify the produced image</code> → <code>Upload recovery.img</code></td><td>无需操作</td><td>打印 header_version / page_size / kernel_size / ramdisk_size；生成 artifact <code>y52s-twrp11-recovery</code></td></tr>
-  <tr><td>8</td><td><strong>若任一步失败</strong></td><td>把该步骤最后 30 行贴给我，或下载 <code>y52s-build-log</code> 放到 <code>build/</code></td><td><strong>我按日志改文件 → commit → push → 自动重跑</strong>，不需要你判断原因</td></tr>
+  <tr><td>7</td><td><code>Verify the produced image</code> → <code>Upload recovery.img</code></td><td>无需操作</td><td>打印 magic / header_version / page_size / kernel_size / ramdisk_size 与 sha256；生成 artifact <code>y52s-twrp11-recovery</code>。<strong>Upload 已设 <code>if: always()</code></strong>，即使前序报错也会上传</td></tr>
+  <tr><td>8</td><td><strong>若任一步失败</strong></td><td>把该步骤最后 30 行贴给我，或在 Actions 页下载 <em>Download log archive</em> 放到 <code>build/</code></td><td><strong>我按日志改文件 → commit → push → 自动重跑</strong>，不需要你判断原因</td></tr>
   <tr><td>9</td><td>构建成功页底部 <strong>Artifacts</strong></td><td>下载 <code>y52s-twrp11-recovery</code>（zip）并解压</td><td>得到 <code>recovery.img</code> + <code>recovery.img.sha256</code></td></tr>
   <tr><td>10</td><td>放到本机</td><td>复制为 <code>C:\Users\30345\WorkBuddy\y52s_rec\build\recovery_ci.img</code></td><td>告诉我一声即可</td></tr>
   <tr><td>11</td><td><strong>由我执行</strong>：只读取证</td><td><code>python build/inspect_ci_image.py build/recovery_ci.img</code></td><td>报告头版本、压缩格式、cpio 关键文件、<code>no_crypto_support</code> / <code>decrypting_user_fbe</code> / <code>keystore2</code>、AVB footer；<strong>不猜任何偏移</strong></td></tr>
@@ -437,7 +459,7 @@ privapp 权限、还引用 <code>frameworks/native/data/etc/...</code> 等 minim
   <li>若 <code>lunch</code> 之后仍报缺 <code>full_base_telephony.mk</code> 相关文件，按日志把它换成更精简的 <code>$(SRC_TARGET_DIR)/product/base.mk</code>——由我改，不预先臆造。</li>
   <li>若 <code>recoveryimage</code> 报缺某些 <code>PRODUCT_COPY_FILES</code>，说明 minimal 树删了对应项目，按日志删该行或加 local manifest。</li>
   <li>产物若自带 AVB footer，后处理需按新内容长度重定位 vbmeta 并同步 footer 字段（本机 v8 起已有可复用逻辑）。</li>
-  <li>工作流已加 <code>Upload build log on failure</code>，任何失败都能拿到 <code>/mnt/build.log</code>，不必靠猜。</li>
+  <li>构建日志由 GitHub 直接记录（Actions 页可下载 <em>Download log archive</em>）；第二次运行已证明多余的 <code>tee /mnt/build.log</code> 会拖垮成功的构建，已移除。</li>
   <li>设备当前仍是 v7：<code>sys.usb.config=adb</code>、HAL running、GUI 正常，可随时继续调试。</li>
 </ul>
 
