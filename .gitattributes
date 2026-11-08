@@ -1,0 +1,13 @@
+# GitHub Actions checks out on Linux. Android's make-based build system and
+# shell scripts break on CRLF, so force LF for every text file. Git detects
+# binary files automatically (ELF kernel, dtb/dtbo containers, .so, .png).
+* text=auto eol=lf
+
+# Explicitly protect binary artefacts from any conversion.
+*.img   binary
+*.so    binary
+*.bin   binary
+*.png   binary
+*.gz    binary
+*.vmdk  binary
+device/vivo/y52s/prebuilt/kernel binary
