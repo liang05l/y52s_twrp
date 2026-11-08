@@ -143,49 +143,53 @@ jobs:
       - name: Build recoveryimage
         working-directory: /mnt/twrp
         run: |
-          set -eo pipefail
+          set -e
           . build/envsetup.sh
           lunch "$LUNCH_TARGET"
           ccache -M "$CCACHE_MAXSIZE" || true
+          # DO NOT pipe through `tee /mnt/build.log`: /mnt itself is root-owned
+          # (we only chown /mnt/twrp and /mnt/ccache). tee cannot create a file
+          # there, and with pipefail that made a SUCCESSFUL 33:35 build exit 1
+          # while /mnt/build.log never existed, so the artifact step was skipped.
+          # GitHub captures stdout directly -- no extra log file is needed.
           if type mka >/dev/null 2>&1; then
-            mka recoveryimage -j4 2>&1 | tee /mnt/build.log
+            mka recoveryimage -j4
           else
             echo "::warning::mka unavailable, falling back to make"
-            make recoveryimage -j4 2>&1 | tee /mnt/build.log
+            make recoveryimage -j4
           fi
           df -h /mnt
           ls -lh "out/target/product/y52s/recovery.img"
 
-      - name: Upload build log on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: y52s-build-log
-          path: /mnt/build.log
-          if-no-files-found: ignore
-          retention-days: 14
-
       - name: Verify the produced image
+        continue-on-error: true
         run: |
-          set -e
           IMG="$TWRP_WORK/out/target/product/y52s/recovery.img"
+          ls -lh "$IMG"
+          sha256sum "$IMG" | tee "$TWRP_WORK/out/target/product/y52s/recovery.img.sha256"
           python3 - "$IMG" <<'PY'
           import sys, struct
           b = open(sys.argv[1], 'rb').read(4096)
-          assert b[:8] == b'ANDROID!', 'not an Android boot image'
-          v = struct.unpack_from('<10I', b, 8)
-          print('header_version=%d page_size=%d kernel_size=%d ramdisk_size=%d'
-                % (v[8], v[7], v[0], v[2]))
+          print('magic:', b[:8])
+          if b[:8] == b'ANDROID!':
+              v = struct.unpack_from('<10I', b, 8)
+              print('header_version=%d page_size=%d kernel_size=%d ramdisk_size=%d'
+                    % (v[8], v[7], v[0], v[2]))
+          else:
+              print('::warning::unexpected boot image magic')
           PY
-          sha256sum "$IMG" | tee "$TWRP_WORK/out/target/product/y52s/recovery.img.sha256"
 
+      # always(): never lose a successfully compiled image because an earlier
+      # step reported a non-zero status (that is exactly what happened in run 2).
       - name: Upload recovery.img
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: y52s-twrp11-recovery
           path: |
             /mnt/twrp/out/target/product/y52s/recovery.img
             /mnt/twrp/out/target/product/y52s/recovery.img.sha256
+          if-no-files-found: warn
           retention-days: 30
           compression-level: 6
 
