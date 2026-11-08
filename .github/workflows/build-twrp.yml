@@ -124,16 +124,46 @@ jobs:
           df -h /mnt
           du -sh /mnt/twrp
 
+      # Regression guard for the first failed CI run (13:41 UTC): the product
+      # makefile inherited vendor/omni/config/common.mk, which the twrp-11 AOSP
+      # manifest does not provide, so lunch could not register omni_y52s.
+      # omni_vendor_omni/android-11's common.mk is Omni *system* content and is
+      # deliberately NOT cloned. Fail fast if that dependency ever comes back.
+      - name: Assert product makefile needs no vendor/omni
+        run: |
+          set -e
+          cd "$TWRP_WORK"
+          if grep -nE '^[[:space:]]*\$\(call inherit-product,[[:space:]]*vendor/' \
+               device/vivo/y52s/omni_y52s.mk; then
+            echo "::error::product makefile still inherits vendor/* - lunch will fail"
+            exit 1
+          fi
+          echo "OK: product makefile is self-contained (AOSP product config only)"
+
       - name: Build recoveryimage
         working-directory: /mnt/twrp
         run: |
-          set -e
+          set -eo pipefail
           . build/envsetup.sh
           lunch "$LUNCH_TARGET"
           ccache -M "$CCACHE_MAXSIZE" || true
-          mka recoveryimage -j4
+          if type mka >/dev/null 2>&1; then
+            mka recoveryimage -j4 2>&1 | tee /mnt/build.log
+          else
+            echo "::warning::mka unavailable, falling back to make"
+            make recoveryimage -j4 2>&1 | tee /mnt/build.log
+          fi
           df -h /mnt
           ls -lh "out/target/product/y52s/recovery.img"
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: y52s-build-log
+          path: /mnt/build.log
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Verify the produced image
         run: |

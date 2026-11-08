@@ -6,7 +6,20 @@
 
 $(call inherit-product, $(SRC_TARGET_DIR)/product/core_64_bit.mk)
 $(call inherit-product, $(SRC_TARGET_DIR)/product/full_base_telephony.mk)
-$(call inherit-product, vendor/omni/config/common.mk)
+# DO NOT inherit vendor/omni/config/common.mk.
+# 1) platform_manifest_twrp_aosp @ twrp-11 declares NO vendor/ project at
+#    all (checked in default.xml), and platform_manifest_twrp_omni has only
+#    5.1 / 8.1 / 10.0-deprecated branches -- there is no Omni 11 manifest.
+# 2) Cloning android_vendor_omni/android-11 does not help: its common.mk only
+#    adds Omni ROM *system* content (bootanimation, sounds, backuptool,
+#    privapp permissions, and frameworks/native/data/etc files that the
+#    minimal tree does not contain). None of it is needed for recoveryimage,
+#    and PRODUCT_COPY_FILES pointing at absent files breaks the build.
+# An unconditional inherit is what made the first CI run abort with
+#   device/vivo/y52s/device.mk:5: error: _nic.PRODUCTS.[[.../omni_y52s.mk]]:
+#   "vendor/omni/config/common.mk" does not exist
+# -> dumpvars failed -> lunch "Device y52s not found".
+# The AOSP product makefiles above are sufficient to register the product.
 $(call inherit-product, device/vivo/y52s/device.mk)
 
 PRODUCT_NAME        := omni_y52s
