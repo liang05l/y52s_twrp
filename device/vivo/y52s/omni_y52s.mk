@@ -1,0 +1,21 @@
+# device/vivo/y52s/omni_y52s.mk
+# Values from device_dump/y52s_dump_20261108_122327/props/getprop.all.txt
+# FIX vs upstream (omni_k6853v1_64_6360.mk): PRODUCT_MODEL was "vivo" and
+# BUILD_FINGERPRINT pointed at compiler12021806 / 1.7.6-era build.
+# Single product for this device only.
+
+$(call inherit-product, $(SRC_TARGET_DIR)/product/core_64_bit.mk)
+$(call inherit-product, $(SRC_TARGET_DIR)/product/full_base_telephony.mk)
+$(call inherit-product, vendor/omni/config/common.mk)
+$(call inherit-product, device/vivo/y52s/device.mk)
+
+PRODUCT_NAME        := omni_y52s
+PRODUCT_DEVICE      := y52s
+PRODUCT_BRAND       := vivo
+PRODUCT_MODEL       := V2057A
+PRODUCT_MANUFACTURER := vivo
+
+BUILD_FINGERPRINT := vivo/PD2057/PD2057:10/QP1A.190711.020/compiler04181705:user/release-keys
+
+# Vendor crypto / gatekeeper modules are added to PRODUCT_COPY_FILES only after
+# they are pulled from THIS device's /vendor (P1 in BoardConfig.mk).

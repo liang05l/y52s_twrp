@@ -1,0 +1,6 @@
+# System versions this recovery.img is verified for (ro.build.version.bbk).
+# kernel / dtb / dtbo are bound to a version: an unlisted version is refused.
+# "目标版本不固定" -> add a version only after rebuilding with its own kernel/dtb.
+PD2057_A_1.16.4
+# In TWRP the system props are not available; match /vendor/build.prop instead.
+vivo/PD2057/PD2057:10/QP1A.190711.020/compiler04181705:user/release-keys

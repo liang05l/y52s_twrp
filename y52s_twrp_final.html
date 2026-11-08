@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>y52s TWRP 最终适配实现（V2057A / PD2057 · 2026-11-08 修正版）</title>
+<style>
+  :root{--ink:#1b2430;--muted:#5b6675;--line:#d9dee6;--bg:#fff;--soft:#f5f7fa;
+        --accent:#185a9d;--warn:#9a5b00;--warnbg:#fff6e6;--ok:#1c6b48;--okbg:#edf7f1}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-size:13.5px;line-height:1.7;
+       font-family:"Microsoft YaHei","PingFang SC","Segoe UI",Arial,sans-serif}
+  .wrap{max-width:1000px;margin:0 auto;padding:32px 40px 60px}
+  h1{font-size:23px;margin:0 0 4px}
+  .sub{color:var(--muted);font-size:12.5px;margin-bottom:16px}
+  .status{background:var(--okbg);border:1px solid #bcdcc9;border-left:4px solid var(--ok);
+          padding:11px 15px;border-radius:4px;margin-bottom:12px;font-size:13px}
+  .block{background:var(--warnbg);border:1px solid #ecd7ae;border-left:4px solid var(--warn);
+         padding:11px 15px;border-radius:4px;margin-bottom:20px;font-size:13px}
+  h2{font-size:18px;margin:28px 0 10px;padding-bottom:7px;border-bottom:2px solid var(--accent)}
+  h3{font-size:14.5px;margin:16px 0 6px;color:var(--accent)}
+  p{margin:7px 0} ul,ol{margin:7px 0 7px 20px;padding:0} li{margin:3px 0}
+  table{width:100%;border-collapse:collapse;margin:9px 0 14px;font-size:12.7px}
+  th,td{border:1px solid var(--line);padding:7px 9px;text-align:left;vertical-align:top}
+  th{background:var(--soft);font-weight:600}
+  code{font-family:Consolas,monospace;background:var(--soft);padding:1px 4px;
+       border-radius:3px;font-size:12px;color:#2a3a4d}
+  .cmd{display:block;background:#f3f5f8;border:1px solid var(--line);border-radius:4px;
+       padding:9px 11px;margin:8px 0 12px;font-family:Consolas,monospace;font-size:12.5px;
+       white-space:pre-wrap;color:#243447}
+  .tag{display:inline-block;font-size:11px;padding:1px 6px;border-radius:9px;
+       border:1px solid var(--line);background:var(--soft);color:var(--muted);margin-right:5px}
+  .tag.ok{background:var(--okbg);border-color:#bcdcc9;color:var(--ok)}
+  .note{background:var(--soft);border-left:3px solid var(--accent);padding:9px 13px;margin:10px 0;font-size:12.8px}
+  .foot{margin-top:28px;padding-top:10px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}
+  @media print{body{font-size:11pt}.wrap{max-width:none;padding:0}
+    h2{page-break-after:avoid}table,.cmd,.note,.block,.status{page-break-inside:avoid}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>y52s TWRP 最终适配实现</h1>
+<div class="sub">仅针对 vivo V2057A / PD2057 ｜ 实机实测 2026-11-08 ｜ 本文件为唯一入口</div>
+
+<div class="status"><strong>本轮修正：概念已分清。</strong>你说的「卡刷」是 <strong>TWRP 自身要具备的功能</strong>（在 recovery 里安装 zip），
+不是把新镜像刷进手机的方式。把 <code>recovery.img</code> 写入设备改为 <strong>adb + root 命令 dd</strong>。
+原先那个「卡刷 zip 安装器」已整目录删除，替换为 <code>flash/</code> 命令刷脚本；范围没有扩大。
+<br><strong>已按你授权完成刷入</strong>：修补版 <code>recovery.img</code> 已用命令写入，分区回读 sha256 一致，设备仍在线，<code>/data</code> 完好，未自动重启。</div>
+
+<div class="block"><strong>关于 /data：数据还在。</strong>已实测 <code>/data/media/0</code> 下有 DCIM、Download、Documents、Android 等真实目录。
+TWRP「不能解密」只是读不出 FBE 加密内容，<strong>不是删除</strong>；全部采集与刷入脚本都是只写 recovery 分区。
+刷机时若 TWRP 弹「格式化 Data」，<strong>不要点</strong>。</div>
+
+<h2>一、两个概念（本轮修正核心）</h2>
+<table>
+  <tr><th style="width:26%">概念</th><th style="width:38%">含义</th><th>本工程怎么处理</th></tr>
+  <tr><td><strong>卡刷（功能目标）</strong></td><td>TWRP 里点「安装 → 选择 zip → 刷入」，属于 recovery 自身能力</td><td><span class="tag ok">保留并修复</span> 检查 ramdisk 里的 zip 引擎、fstab 挂载、外置存储识别，作为验收项（见第三节）</td></tr>
+  <tr><td><strong>刷入通道（本次适配动作）</strong></td><td>把修补后的 <code>recovery.img</code> 写进设备的 recovery 分区</td><td><span class="tag ok">命令刷</span> <code>adb shell</code> + Magisk root <code>dd</code>，由 <code>flash/flash_recovery.ps1</code> 完成，不需要 zip、不需要 fastboot、不依赖 BL 讨论</td></tr>
+</table>
+<p>上一版误把「卡刷」当成刷入通道并生成了安装包，现已删除。内核 cmdline 实测
+<code>device_state=unlocked / orange / eio</code>（getprop 的 locked/green 是属性覆盖），但命令刷不走这条路径，无需再确认解锁事项。</p>
+
+<h2>二、你的四个问题（结论保持不变）</h2>
+<ol>
+  <li><strong>仓库</strong>：<code>AceEdg/vivo-Y52s-devicetree @ twrp-10.0</code> 就是它。铁证：现有 <code>recovery.img</code> 的
+      <code>kernel_size=16817288</code>、<code>dtb_size=158641</code> 与仓库 <code>prebuilt/kernel</code>、<code>prebuilt/dtb.img</code> 字节数完全一致，
+      header v2 / base / pagesize / offsets 也吻合——设备上跑的 TWRP 就是这棵树编的，素材不用再找。</li>
+  <li><strong>刷写通道</strong>：不用你判断，已按「用命令刷」定为 adb + root dd。目标 <code>/dev/block/by-name/recovery → /dev/block/sdc1</code>，
+      <code>ro=0</code>，大小 100663296 B。</li>
+  <li><strong>/data 数据</strong>：在，已实测。FBE（f2fs + <code>fileencryption=aes-256-xts</code>）解不开 ≠ 删除；
+      采集只读，命令刷脚本内无 <code>format/wipe</code>，<code>userdata/metadata/super</code> 全程不出现。</li>
+  <li><strong>现有 TWRP 的 bug</strong>：解密根因已定位（配置未开 <code>TW_INCLUDE_CRYPTO*</code>、ramdisk 缺
+      keymaster/gatekeeper/vendor HAL、fstab 缺 FBE 标志且未指定 <code>TWRP_FSTAB</code>）；另有已确认错配：
+      动态分区组 <code>vivo_dynamic_partitions</code>/9122611200 → 实测 <code>main</code>/8472494080、
+      cmdline <code>1.7.6</code> → <code>1.16.4</code>、userdata <code>ext4</code> → <code>f2fs</code>、
+      MODEL <code>vivo</code> → <code>V2057A</code>、fingerprint <code>compiler12021806</code> → <code>compiler04181705</code>、
+      init rc 的 gatekeeper 路径 <code>/vendor/bin/...</code> 不存在（真实在 <code>/vendor/bin/hw/...</code>）。</li>
+</ol>
+
+<h2>三、TWRP 卡刷功能：实测状态与修复点</h2>
+<p>解包现有 <code>recovery.img</code> 的 ramdisk（gzip → cpio 3557 项）后逐项核对：</p>
+<table>
+  <tr><th style="width:34%">组件</th><th style="width:22%">实测</th><th>结论</th></tr>
+  <tr><td>TWRP 主程序</td><td><code>system/bin/twrp</code> 在</td><td>卡刷主逻辑存在</td></tr>
+  <tr><td>zip 工具链</td><td><code>unzip</code>、<code>zipinfo</code>、<code>ziptool</code>、<code>libziparchive.so</code> 在</td><td>能读 zip；<code>updater</code>/<code>edify</code> 不在 ramdisk 属正常（zip 自带 update-binary）</td></tr>
+  <tr><td>安装界面 / 签名证书</td><td><code>res/images/installing_text.png</code>、<code>otacerts.zip</code> 在</td><td>安装流程资源齐备</td></tr>
+  <tr><td><strong>fstab</strong></td><td>整个 ramdisk 只有 <code>system/etc/recovery.fstab</code>，是<strong>原厂 first_stage_mount 格式</strong>；上游那份 TWRP 格式 <code>recovery.fstab</code> 根本没进镜像</td><td><span class="tag ok">必修</span> BoardConfig 未设 <code>TWRP_FSTAB</code>；修补时须把修正版 fstab 放到 TWRP 实际读取路径，否则挂载/解密/卡刷都异常</td></tr>
+  <tr><td><strong>外置存储</strong></td><td><code>usbotg</code> 命中 0；上游 fstab 的两条 <code>auto</code> 行丢掉了原厂的 <code>voldmanaged=sdcard1:auto</code> / <code>voldmanaged=usbotg:auto</code></td><td><span class="tag ok">待真机验证</span> 卡刷 zip 常放 SD/OTG，若识别不了就没法选包；按 twrp-10.0 的 vold 语法修，不臆造参数</td></tr>
+  <tr><td><strong>/data 解密</strong></td><td>keymaster / gatekeeper / <code>vendor/lib64/hw</code> 命中 0，而 init rc 声明了这些服务</td><td>卡刷时若要写 /data 或读内部存储的 zip 会失败；修法见 BoardConfig 的 P1 清单</td></tr>
+</table>
+<div class="note">因此「卡刷功能」的验收不是「能不能把 TWRP 刷进去」，而是：进 TWRP → 能挂载分区 → 能读到 zip（内置或 SD/OTG）→ 安装一个只打印的测试 zip 成功。<strong>不能格式化 /data</strong>，验证时也不要用会改数据的包。</div>
+
+<h2>四、最终实现文件与命令刷通道</h2>
+<div class="note"><strong>实现路径（未扩大）：</strong>解包现有 <code>recovery.img</code> → 修补 ramdisk（换修正版 fstab 到正确路径、加入本机 /vendor 解密模块、修 init rc 的 gatekeeper 路径、确认 <code>recovery.service=1</code>）→ 按实测头参数用 magiskboot 重打包并补齐到分区大小 → 用命令刷入。不需要搭 Omni 源码树编译。</div>
+<div class="cmd">powershell -ExecutionPolicy Bypass -File .\flash\flash_recovery.ps1 -Image .\build\recovery.img</div>
+<p><code>flash/flash_recovery.ps1</code> 做的事：校验 adb 授权与 <code>uid=0</code> → 用 <code>ro.build.version.bbk</code> 比对
+<code>flash/allowed_versions.txt</code> → 把镜像零填充到 100663296 B 并算 sha256 → 以<strong>文件方式</strong>推送设备脚本与载荷
+（引号全在脚本内，不经过 adb shell 拼接）→ 设备侧自举 root 后只 <code>dd</code> 到 recovery → <code>sync</code> →
+回读整分区 sha256 比对。任一步不符即退出，不动 /data。</p>
+<table>
+  <tr><th style="width:42%">文件</th><th>状态</th></tr>
+  <tr><td><code>y52s_twrp_final.html</code></td><td>唯一入口（本文件）</td></tr>
+  <tr><td><code>device/vivo/y52s/BoardConfig.mk</code></td><td>按实测修正：cmdline 1.16.4、组 main/8472494080、userdata f2fs、<code>TWRP_FSTAB</code> + <code>TW_INCLUDE_CRYPTO*</code>；P1 列出已验证的 vendor 解密模块路径</td></tr>
+  <tr><td><code>device/vivo/y52s/recovery.fstab</code></td><td>上游 fstab 基础上只改 <code>/data</code> 行补 FBE 标志；外置存储两行标为待验证（不臆造）</td></tr>
+  <tr><td><code>device/vivo/y52s/fstab.mt6853</code></td><td>原厂 fstab 逐字副本（证据）</td></tr>
+  <tr><td><code>device/vivo/y52s/omni_y52s.mk</code> · <code>device.mk</code> · <code>AndroidProducts.mk</code> · <code>prebuilt/README.md</code></td><td>产品定义自洽、镜像清单与待提取模块</td></tr>
+  <tr><td><code>reference/*.orig</code></td><td>上游 BoardConfig / recovery.fstab 原版，供 diff</td></tr>
+  <tr><td><code>flash/flash_recovery.ps1</code> · <code>flash/device_flash.sh</code> · <code>flash/allowed_versions.txt</code></td><td><span class="tag ok">本轮新增</span> 命令刷通道（替代已删除的 installer 卡刷包）</td></tr>
+  <tr><td><code>collect/</code></td><td>实机采集器，已跑通并修正 root 误报</td></tr>
+  <tr><td><code>build/build_recovery.py</code></td><td><span class="tag ok">本轮新增</span> 从实测镜像重建修补版；只改一处 rc，头/内核/dtb/AVB 尾部原样保留</td></tr>
+</table>
+
+<h3>本轮已执行的刷入（2026-11-08）</h3>
+<p>修补版由 <code>build/build_recovery.py</code> 生成，只改 <code>init.recovery.platform.rc</code> 两处：
+gatekeeper 服务路径改为设备上真实存在的 <code>/vendor/bin/hw/...</code>；在 <code>on post-fs</code> 加
+<code>setprop recovery.service 1</code>（rc 里所有 keymaster/gatekeeper 服务都被这个属性门控，却没有任何地方设置它）。
+其余 3557 个 cpio 条目、kernel、dtb、AVB footer 与内嵌 vbmeta 全部原样。</p>
+<table>
+  <tr><th style="width:32%">项</th><th>结果</th></tr>
+  <tr><td>命令</td><td><code>flash_recovery.ps1 -Image build\recovery.img</code>：校验授权与 root、版本 <code>PD2057_A_1.16.4</code> 命中白名单、push 后设备侧自举 root 只 <code>dd</code> 到 recovery</td></tr>
+  <tr><td>分区回读校验</td><td><span class="tag ok">通过</span> 脚本内回读 + 独立 <code>sha256sum /dev/block/by-name/recovery</code> 均为 <code>b4a1f296986c981f6d6b2c48e0eaf46e924afc1e4591d6cb79d346f23a415657</code></td></tr>
+  <tr><td>设备状态</td><td>仍为 <code>device</code>（未重启）；<code>/data/media/0</code> 95 个条目完好，未格式化、未写入 /data</td></tr>
+  <tr><td>回退</td><td><code>flash_recovery.ps1 -Image device_dump\y52s_dump_20261108_122327\images\recovery.img</code>（原 TWRP，96 MB）一条命令刷回</td></tr>
+</table>
+
+<h2>五、构建产物、边界与验证</h2>
+<p><strong>产物</strong>：<code>build/build_recovery.py</code>（构建脚本）、<code>build/recovery.img</code>（修补版，100663296 B）、
+<code>build/recovery.img.sha256</code>；
+回退镜像为 <code>device_dump/y52s_dump_20261108_122327/images/recovery.img</code>（96 MB，sha256 见 manifest.txt），
+用同一条命令 <code>-Image</code> 指回它即可刷回。<strong>不再产出任何卡刷安装包。</strong></p>
+<p><strong>边界</strong>：kernel/dtb 与版本绑定，<code>flash/allowed_versions.txt</code> 当前只有 <code>PD2057_A_1.16.4</code>；
+要支持另一版须用该版 kernel/dtb/cmdline 重新打包再追加版本，未列出的版本脚本拒绝刷入（对应你说「不固定」）。
+解密能否成功取决于本机 vendor Trustonic keymaster/gatekeeper，需真机验证；不改 system/vendor、不碰 /data、不做多机型包。</p>
+<ol>
+  <li><strong>离线（已完成）</strong>：新镜像头参数与实测头逐项对照、sha256 一致、kernel/dtb/AVB 尾部原样、cpio 3558 项 round-trip、脚本全文无 <code>format/wipe/userdata</code>。</li>
+  <li><strong>刷前（已完成）</strong>：确认回退镜像可用；版本白名单命中；<code>/data/media/0</code> 留底。</li>
+  <li><strong>真机（刷入已完成，待你进 recovery 观察）</strong>：<code>adb reboot recovery</code> →
+      检查 1080×2408 显示与触控、分区挂载、<code>/data</code> 解密状态（失败只记录，<strong>不点格式化</strong>）→
+      <strong>卡刷功能验收</strong>：放一个只打印的测试 zip（内置存储或 SD/OTG），在 TWRP 里安装成功 →
+      重启进系统 → 用回退镜像命令刷回，验证仍可开机。</li>
+  <li><strong>判据</strong>：可进系统、命令刷可回退、/data 数据完好、TWRP 能安装测试 zip；解密失败只作为待修项记录。</li>
+</ol>
+
+<h3>解密与「乱码」的判定（基于实测属性，不是推测）</h3>
+<p>本机是 FBE：<code>ro.crypto.type=file</code>、<code>fileencryption=aes-256-xts</code>、
+<code>ro.crypto.volume.filenames_mode=aes-256-cts</code>（<strong>连文件名都加密</strong>），
+<code>gatekeeperd</code> 运行中，vendor 侧有 Trustonic keymaster / gatekeeper。FBE 有两级密钥：
+<strong>DE</strong>（设备密钥，开机即可用，不需要密码）和 <strong>CE</strong>（凭证密钥，必须用锁屏 PIN / 图案 / 密码经
+gatekeeper + keymaster 派生）。TWRP 要读到你的文件，<strong>必须走 CE 解密、也就是必须弹密码框让你输锁屏密码</strong>。</p>
+<table>
+  <tr><th style="width:34%">在 TWRP 里看到</th><th style="width:36%">含义</th><th>怎么办</th></tr>
+  <tr><td>弹出「输入密码 / Password」</td><td>解密流程已启动，正常</td><td>输入<strong>锁屏</strong> PIN / 图案 / 密码（不是 Google 账号、不是另一个"加密密码"）；若设备只设了滑动解锁，TWRP 通常用默认密码自动解，不弹框</td></tr>
+  <tr><td><strong>不弹密码框，/data 里是一堆乱码文件名</strong></td><td>只有 DE 密钥（或解密流程根本没跑），CE 密钥没派生；<code>aes-256-cts</code> 加密的文件名就显示成随机串</td><td><strong>不是数据丢了，也不是显示 bug</strong>。不要格式化 Data；回系统用 root 直接读 /data 是正常的</td></tr>
+  <tr><td><code>Decryption failed</code> / <code>Unable to mount /data</code></td><td>keymaster/gatekeeper 服务没起来，或密钥不匹配</td><td>同上；不要点 Wipe / Format</td></tr>
+  <tr><td>/data 里是 DCIM、Download 等正常目录名</td><td>CE 解密成功</td><td>可正常备份与卡刷</td></tr>
+</table>
+<div class="note"><strong>为什么现在很可能不弹密码框：</strong>上游 <code>BoardConfig.mk</code> 没有 <code>TW_INCLUDE_CRYPTO_FBE</code>，
+<code>system/bin/twrp</code> 二进制可能根本没编译 FBE 解密代码——这决定它会不会发起密码输入流程。
+已刷入的这版只修了「服务触发」与「gatekeeper 路径」，改不了二进制本身。
+好消息是：<strong>系统里已实测 <code>/data/media/0</code> 有 95 个正常条目</strong>，数据完好；乱码只是 TWRP 没拿到 CE 密钥时的视图。</div>
+<p>要确认到底属于哪一种，需要设备重新连上 USB（当前 adb / fastboot / PnP 都看不到设备），
+连上后我可以进 TWRP 读 <code>recovery.log</code>、<code>mount</code> 与解密相关属性再定。
+若确认是二进制缺 FBE 支持，就只能用 twrp-10.0 源码树重编译，刷 ramdisk 解决不了。</p>
+
+<h3>13:35 之后：真机追踪与两次定向修复</h3>
+<table>
+  <tr><th style="width:22%">项</th><th>实测结论</th></tr>
+  <tr><td>连接</td><td>TWRP 里开着 MTP 时 adb 连不上；关掉 MTP 后 <code>sys.usb.config=adb</code> 即可连。重启后可能复位，需要再关一次</td></tr>
+  <tr><td>TWRP 版本</td><td><code>ro.twrp.version = 3.7.1_12-0</code>。<strong>二进制有完整 FBE 解密能力</strong>：日志加载 decrypt / decrypt_pin / decrypt_pattern / decrypt_users 页面，检测到 <code>FBE contents 'aes-256-xts'</code>、keymaster 4.x —— <strong>纠正之前「可能没编译 FBE 支持」的猜测，不需要重编译 TWRP</strong></td></tr>
+  <tr><td>现象确认</td><td>没弹密码框；<code>/data/media/0</code> 是 140 个 base64 风格乱码名，<code>/data</code> 根目录却是正常 DE 目录 → 只有 DE 密钥、没拿到 CE 密钥，数据未丢</td></tr>
+  <tr><td>确定根因</td><td>logcat：<code>CANNOT LINK EXECUTABLE ... library "android.hardware.keymaster@4.0.so" not found</code> 与 <code>android.hardware.gatekeeper@1.0.so</code>，服务每 5 秒崩一次。TWRP 把系统挂在 <code>/system_root</code>，VNDK/HIDL 库不在默认 linker 搜索路径</td></tr>
+  <tr><td>v1（已刷）</td><td>修 gatekeeper 服务路径 + <code>setprop recovery.service 1</code>。属性=1，但服务因缺库启动即崩溃（<code>restarting</code>）</td></tr>
+  <tr><td>v2（已刷，当前）</td><td>从本机 <code>/system_root/system/lib64</code> 取回 4 个库（2 个 HIDL + <code>android.hardware.keymaster@3.0.so</code> + <code>libhwbinder.so</code>，DT_NEEDED 已核对无遗漏）补进 ramdisk；在 <code>on post-fs</code> 显式 start。重启后 4 个库确实存在于运行中的 TWRP，但服务仍未被拉起</td></tr>
+  <tr><td>v3（已刷，当前）</td><td>把 3 个 HAL 服务以新名字 <code>y52s_mobicore / y52s_keymaster / y52s_gatekeeper</code> 重新声明进已证实被加载的 <code>init.recovery.svc.rc</code>，并用 <code>on init</code> + <code>on property:twrp.modules.loaded=true</code> 双触发。分区回读 sha256 <code>f18f062a…</code> 一致，重启后 <strong>服务仍未注册、无链接错误、/data 仍是乱码</strong></td></tr>
+  <tr><td>当前卡点</td><td>对照实验：<code>start logd</code> 成功（running），<code>start mobicore / keymaster / gatekeeper</code> 报 <code>Unable to start service</code> → <code>init.recovery.platform.rc</code> 的 service 定义没被 init 加载（rc 文件本身完整、4876 B）；<code>on post-fs</code> 也不是 TWRP init 实际触发的 action。v3 换了文件与触发点仍未注册，说明问题在 <strong>init 对这些 rc 的解析/加载环节</strong>，不是再改一次就能盲试出来的</td></tr>
+</table>
+<p><strong>已经解决的部分</strong>：<code>CANNOT LINK</code> 消失，4 个 HIDL 库确实在运行中的 TWRP 里；
+<strong>未解决的部分</strong>：keymaster / gatekeeper HAL 服务没有被 init 注册，因此 TWRP 拿不到 CE 密钥、不弹密码框。
+另外 TWRP 日志里 <code>Separate manifest doesn't exist for 'android.hardware.keymaster' / Looking for ... in manifest</code>，
+提示 TWRP 自身的 HAL 发现路径（vendor VINTF manifest）也可能是必要条件——这需要下一次真机连上后专门验证，不是靠重复刷镜像能确定的。</p>
+<h3>17:00 之后：v4 打通了解密链路</h3>
+<p><strong>确切根因（此前一直找错方向）</strong>：<code>/dev/block/mapper/</code> 里有 <code>system / vendor / product</code> 逻辑分区节点，
+但 TWRP 启动时<strong>没有挂载 <code>/system_root</code> 和 <code>/vendor</code></strong>（mount 表只有 /apex、/cache、/data）。
+于是 <code>/vendor/bin/hw/</code> 不存在，keymaster / gatekeeper 服务二进制找不到，init 直接拒绝启动（<code>Unable to start service</code>）——
+之前补库、改 rc、换服务名都绕不开这一条。VINTF manifest 也只有 <code>health@2.1.xml</code>，没有 keymaster 条目。</p>
+<p><strong>运行时验证（不刷镜像）</strong>：手动
+<code>mount -t ext4 -o ro /dev/block/mapper/system /system_root</code>、<code>…/vendor /vendor</code>，
+并把 <code>/system_root/system/lib64</code>、<code>vndk-29</code>、<code>/vendor/lib64</code> 加入库搜索路径后，
+<strong>两个 HAL 都成功启动、日志无错误</strong>（缺的 <code>libkeymaster_messages.so</code>、<code>libpuresoftkeymasterdevice.so</code> 都在系统分区）。</p>
+<p><strong>v4 落地</strong>：ramdisk 新增可执行脚本 <code>/sbin/y52s_prepare.sh</code>（挂载两个逻辑分区），
+在 <code>init.recovery.svc.rc</code> 重声明两个 HAL 服务并加 <code>setenv LD_LIBRARY_PATH</code>，
+由 <code>on property:twrp.modules.loaded=true</code> 触发 <code>exec_start</code> + <code>start</code>。
+分区 sha256 <code>3ce01657…</code> 回读一致。</p>
+<table>
+  <tr><th style="width:32%">v4 重启后实测</th><th>结果</th></tr>
+  <tr><td>逻辑分区挂载</td><td><span class="tag ok">成功</span> <code>dm-2 → /system_root</code>、<code>dm-1 → /vendor</code></td></tr>
+  <tr><td>HAL 服务</td><td><span class="tag ok">成功</span> <code>init.svc.y52s_keymaster=running</code>、<code>init.svc.y52s_gatekeeper=running</code>，两个进程在跑，<code>CANNOT LINK</code> 消失</td></tr>
+  <tr><td>TEE 连接</td><td><span class="tag ok">成功</span> logcat 出现 <code>TrustonicKeymaster4DeviceImpl</code>、<code>TlcTeeGatekeeper: t-base-MTK-ARMv8</code>，recovery 开始访问 <code>/data/misc/.../gatekeeper</code> 数据</td></tr>
+  <tr><td>/data 解密</td><td><span class="tag wait">未完成</span> <code>/data/media/0</code> 仍是乱码名；TWRP 日志显示 <code>fbe.filenames</code> 为空，且 TWRP 的 build 是 <code>16.1.0 / 2099-12-31</code>（上游防回滚 hack），与真实系统 <code>Android 10 / 2023-02-01</code> 不一致，keymaster 读到的 <code>os_version=120000, os_patchlevel=209912</code> 可能导致密钥版本不匹配</td></tr>
+</table>
+<h3>17:20 之后：v5 版本对齐、v6 倒退并撤销</h3>
+<table>
+  <tr><th style="width:20%">版本</th><th>结果</th></tr>
+  <tr><td>v5</td><td>把 <code>prop.default</code> 的版本属性对齐实测值（release 12→10、sdk 32→29、patch 2099-12-31→2023-02-01、vendor patch→2020-07-05，含 system/vendor/product/odm/system_ext 等所有分区级同名项）。重启后 keymaster 日志确认 <code>os_version=100000, os_patchlevel=202302, vendor_patchlevel=20200705</code>；HAL running、TEE 已连、无链接错误，但 <code>/data/media/0</code> 仍是乱码</td></tr>
+  <tr><td>v6（已撤销）</td><td>把 <code>system/etc/recovery.fstab</code> 换成 TWRP 格式修正版后<strong>倒退</strong>：<code>Keymaster_Ver::Using keymaster version ''</code>（原本 <code>4.x</code>）、<code>/data</code> 变成只读挂载。该改动已从构建脚本移除，<strong>不要再试</strong></td></tr>
+</table>
+<h3>17:30 之后：默认关闭 MTP（v7，已刷入并验证）</h3>
+<p>此前每次重启都要手动关 MTP 才连得上 adb，这是应该在镜像里解决的。查到两处根因：
+① <code>prop.default</code> 里 <code>persist.sys.usb.config=adb</code> 被后面 <strong>4 行 <code>=none</code></strong> 覆盖；
+② TWRP 启动后自身默认把 USB 切到 MTP、<code>sys.usb.ffs.mtp.ready</code> 置 1。</p>
+<p>v7 把 4 行统一改成 <code>=adb</code>，并在 <code>init.recovery.usb.rc</code>（保持原文件 CRLF 行尾）追加属性拦截：
+任何 <code>sys.usb.config=mtp / mtp,adb / adb,mtp</code> 立即改回 <code>adb</code>。
+产物 sha256 <code>0c60a72706538761d9d9d51ab6d33e15cc7361c08c916ac66ba867f9eb166bb0</code>。</p>
+<div class="note"><strong>验证（连续两次重启，全程未手动关 MTP）</strong>：
+<code>sys.usb.config=adb</code>、<code>sys.usb.state=adb</code>、<code>sys.usb.ffs.mtp.ready=0</code>，
+adb 自动连上；<code>init.svc.y52s_keymaster / y52s_gatekeeper</code> 仍 running。
+v7 基于 v5（不含 v6 的 fstab 倒退），因此 <strong>recovery 分区已从有问题的 v6 恢复</strong>。</div>
+<h3>17:45 最终结论：不是配置问题，是 TWRP 二进制没编译加密支持</h3>
+<p>用户反馈「没有输密码的界面」。改用 TWRP 自带命令行直接触发解密
+<code>twrp decrypt default_password</code>，把输出按 UTF-8 解码，原文是：</p>
+<div class="cmd">正在尝试通过命令行解密 Data 分区或用户数据。
+此版本不支持加密。</div>
+<p>主程序是 <code>/system/bin/recovery</code>（2,207,880 B）；<code>/system/bin/twrp</code> 只是 11 KB 的命令行转发壳。
+源码核对（<code>TeamWin/android_bootable_recovery</code>）：<code>Decrypt_Device()</code> 的解密实现、以及启动时设置
+<code>TW_IS_ENCRYPTED</code> 并打开密码页的 <code>Decrypt_Data()</code>，都整段在 <code>#ifdef TW_INCLUDE_CRYPTO</code> 内；
+FBE 子路径还额外由 <code>#ifdef TW_INCLUDE_FBE</code> 保护；<code>no_crypto_support=...</code> 只出现在 <code>#else</code> 分支。
+即这一版编译时<strong>没有定义这两个宏</strong>（不是缺一个配置文件）。这解释了全部现象：不弹密码框、GUI 无解密入口、命令行 decrypt 直接拒绝。</p>
+<p><strong>纠正 13:35 的误判</strong>：当时据「加载了 decrypt 页面」推断二进制有 FBE 能力，是错的。
+v2–v7 补库、挂载逻辑分区、启动 HAL、对齐 os_version，打通的都是<strong>底层依赖</strong>，但主程序里没有调用它们的代码，
+所以<strong>刷 ramdisk 补丁永远解不了密</strong>。继续改镜像没有意义，已停止。</p>
+<p><strong>要真正解密只有一条路：用与本机 FBE 框架匹配的源码重新编译</strong>（BoardConfig 启用
+<code>TW_INCLUDE_CRYPTO := true</code> + <code>TW_INCLUDE_FBE := true</code>）。
+「换一个现成带 FBE 的 twrp 镜像」这条路本轮已实测证伪，见下一节。</p>
+<p><strong>当前状态</strong>：v7 已刷入，默认关 MTP、adb 稳定，底层链路（库 / 逻辑分区挂载 / HAL / os_version / TEE）全部齐备——
+一旦换上带加密支持的 twrp 二进制即可直接工作。数据完好（系统里 <code>/data/media/0</code> 95 个正常条目），
+可在系统里用 root 直接打包备份；<strong>不要点 Format Data</strong>。</p>
+<p><strong>不依赖解密的替代路径</strong>：数据完好（系统里 <code>/data/media/0</code> 有 95 个正常条目），
+可在系统里用 root 直接打包到电脑；或用
+<code>flash_recovery.ps1 -Image device_dump\y52s_dump_20261108_122327\images\recovery.img</code> 刷回原 TWRP。</p>
+
+<h2>六、18:00 之后：「你帮我编译」的完整处理</h2>
+
+<h3>6.1 结论先行</h3>
+<div class="block"><strong>本机没能完成源码编译，也没有把「编译」推给你做</strong>：先把编译开关、构建环境、替代路径全部实测了一遍，
+能自动做的都做了（源码取证、环境探测、可编译工程、二进制移植与三轮定向修复）。
+<strong>唯一真正能解密的方案仍是源码重编译</strong>，而它在本机被环境硬阻塞；设备已回退到稳定可用的 v7。</div>
+
+<h3>6.2 为什么必须重编译（源码级，不是推测）</h3>
+<table>
+  <tr><th>证据</th><th>结论</th></tr>
+  <tr><td><code>partitionmanager.cpp</code>：<code>Decrypt_Device()</code> 实现整段在 <code>#ifdef TW_INCLUDE_CRYPTO</code> 内，<code>#else</code> 只输出 <code>no_crypto_support</code> 并返回 -1</td><td>现有二进制未定义该宏 → 命令行 decrypt 直接拒绝</td></tr>
+  <tr><td>启动时设 <code>TW_IS_ENCRYPTED</code> 并调用 <code>Decrypt_Data()</code> 的代码也在同一个 <code>#ifdef</code> 内</td><td>所以<strong>永远不弹密码框</strong>，与用户实测一致</td></tr>
+  <tr><td>FBE 用户密钥路径 <code>android::keystore::Decrypt_User</code> 额外由 <code>#ifdef TW_INCLUDE_FBE</code> 保护</td><td>两个宏必须同时定义；<code>TW_INCLUDE_CRYPTO_FBE</code> 是旧写法，11/12 分支都不认</td></tr>
+  <tr><td>现有 <code>/system/bin/recovery</code>：2,207,880 B，含 <code>no_crypto_support</code>、不含 <code>decrypting_user_fbe</code></td><td>二进制级复核，与源码判定一致</td></tr>
+</table>
+
+<h3>6.3 本机构建环境逐项核实（不可绕过，不是我推给你做）</h3>
+<table>
+  <tr><th>项</th><th>实测</th><th>影响</th></tr>
+  <tr><td>WSL</td><td><code>wsl.exe</code> 被安全策略列入黑名单，拒绝访问且<strong>不可申请绕过</strong></td><td>没有 Linux 用户态</td></tr>
+  <tr><td>Docker</td><td>客户端在，daemon 未运行（<code>npipe dockerDesktopLinuxEngine</code> 不存在）</td><td>无容器构建环境</td></tr>
+  <tr><td>VMware</td><td>有 Ubuntu VM（4 vCPU / 16 GB / 103.8 GB 盘）、<code>D:\VMware\vmrun.exe</code>，但 VM 未运行、无 guest 凭据</td><td>无法在 VM 内执行构建命令</td></tr>
+  <tr><td>工具链</td><td>有 git / python3 / curl / JRE8 / NDK r29；<strong>无 make、gcc、JDK、repo、AOSP 树</strong></td><td>Android/Soong 构建系统只能跑在 Linux</td></tr>
+  <tr><td>网络</td><td>小文件可通；GitHub release 504、dl.twrp.me 单连接限速；用 8 段并发 Range 才下完 79 MB 参考镜像</td><td><code>repo sync</code> 需 40–60 GB，当前链路不现实</td></tr>
+</table>
+<p>结论：Windows 原生编不了 AOSP/Omni；WSL 不可开、VM 无凭据、大流量下载不可行。<strong>这是环境权限，不是技术步骤缺失</strong>。</p>
+
+<h3>6.4 已落地的「可编译工程」（一旦有 Linux 环境即可一键执行）</h3>
+<table>
+  <tr><th>文件</th><th>内容 / 修正</th></tr>
+  <tr><td><code>build/compile_twrp.sh</code></td><td>完整一键编译：<code>repo init -b twrp-11</code> → sync → 放入本机 device tree → <code>lunch omni_y52s-eng</code> → <code>mka recoveryimage</code> → 产物校验与复制</td></tr>
+  <tr><td><code>device/vivo/y52s/BoardConfig.mk</code></td><td>改为 <code>TW_INCLUDE_CRYPTO := true</code> + <code>TW_INCLUDE_FBE := true</code>；按 v5 实测把 <code>PLATFORM_SECURITY_PATCH / VENDOR_SECURITY_PATCH / PLATFORM_VERSION</code> 改成 <code>2023-02-01 / 2020-07-05 / 10</code>，避免 keymaster 的 os_version 不匹配</td></tr>
+  <tr><td><code>build/extract_prebuilt.py</code> → <code>prebuilt/</code></td><td>从本机实测镜像提取 kernel（16,817,288 B）、dtb（158,641 B）、dtbo（8 MB），均带 sha256，无需外部下载</td></tr>
+  <tr><td><code>build/build_recovery.py</code></td><td>ramdisk 后处理：HIDL 库、逻辑分区挂载、HAL 服务、版本属性对齐、默认关 MTP、AVB footer 重定位（v8 起 ramdisk 变大，vbmeta 需按新 page 重定位并同步 footer 字段）</td></tr>
+</table>
+<p><strong>分支选择是证据驱动的</strong>：本机 Android 10 的 FBE 用旧 <code>android.security.keystore</code> + HIDL
+<code>keymaster@4.0</code> / <code>gatekeeper@1.0</code>。<code>android-11</code> 的 <code>crypto/fscrypt/Decrypt.cpp</code> 用的正是这套
+（<code>String16("android.security.keystore")</code>、<code>V4_0::KeyPurpose::DECRYPT</code>、<code>V1_0::IGatekeeper</code>），
+<strong>且不含任何 keystore2 引用</strong>；minimal manifest 有 <code>twrp-11</code> 分支。<code>twrp-12.1</code> 已实测不兼容（见 6.6），<strong>禁止使用</strong>。</p>
+
+<h3>6.5 等效实现尝试：移植官方同版本 FBE 主程序（v8 → v10）</h3>
+<p>为了不等 Linux 环境，我尝试了「移植带加密支持的同版本主程序」：从官方
+<code>twrp-3.7.1_12-0-r8q.img</code>（82,694,144 B，8 段并发下载 + sha256）取出
+<code>system/bin/recovery</code>（2,514,472 B）。离线校验：无 <code>no_crypto_support</code>、有
+<code>decrypting_user_fbe</code>、版本同为 <code>3.7.1_12-0</code> → <strong>确实编译了加密支持</strong>。</p>
+<table>
+  <tr><th>版本</th><th>定向修复（每步都有证据）</th><th>结果</th></tr>
+  <tr><td>v8</td><td>换主程序 + 补齐 13 个 DT_NEEDED 库（含 2 个递归依赖）</td><td>离线校验通过；刷入后 <code>CANNOT LINK: cannot locate symbol "crypto_scrypt"</code>，GUI 退出 status 1</td></tr>
+  <tr><td>v9</td><td>全量符号闭包比对（706 个未定义符号）→ 唯一缺口 <code>crypto_scrypt</code> 由官方 <code>libtar.so</code> 导出；替换 libtar + 递归补齐 22 个库</td><td>主程序未解析符号 <strong>0</strong>；GUI 正常启动，日志出现 <code>TW_INCLUDE_CRYPTO := true</code>、<code>File Based Encryption is present</code></td></tr>
+  <tr><td>v10</td><td>三个自举脚本 + <code>on init</code> / <code>init.svc.recovery</code> 三重触发，让 keymaster/gatekeeper HAL 在 GUI 前自动就绪</td><td>HAL 自动 running ✓，但 GUI 永久停在 <code>Attempting to initialize DE keys</code></td></tr>
+</table>
+
+<h3>6.6 决定性失败原因（logcat 原文）</h3>
+<div class="cmd">ServiceManager: Waited one second for android.system.keystore2.IKeystoreService/default
+... could not be found, trying to start it as a lazy AIDL service
+init: Control message: Could not find 'aidl/android.system.keystore2.IKeystoreService/default'</div>
+<p>官方 12.1 二进制的 FBE 走 <strong>keystore2 AIDL</strong>；本机是 Android 10，只有 HIDL keymaster/gatekeeper，
+<strong>系统里根本没有 keystore2 服务，也没有对应的 lazy AIDL 声明</strong>，补库无法凭空造出这个服务。
+这是<strong>基线不匹配</strong>，不是配置或路径问题——移植路线到此为止，不再刷第四版。
+同时它也反向证明了 6.4 的分支判断：必须用 11（或 10）基线的源码编译。</p>
+
+<h3>6.7 当前设备状态</h3>
+<div class="block">v10 会让 GUI 卡死，<strong>已刷回稳定的 v7</strong>（sha256 <code>0c60a727…</code>）并硬重启验证：
+主程序 2,207,880 B、GUI 进程正常、<code>y52s_keymaster / y52s_gatekeeper</code> running、
+<code>sys.usb.config=adb</code>（默认关 MTP 仍生效）。v10 镜像归档在
+<code>build/recovery_v10_keystore2.img</code> 仅供取证，不可日常使用。
+<strong><code>build/recovery.img</code> 已同步为 v7</strong>，与分区 sha256 完全一致；
+注意 <code>build/build_recovery.py</code> 当前仍保留 v10 的移植配置（会替换主程序），
+<strong>不要直接重跑它当日常构建</strong>——要重建 v7 请直接用 <code>build/recovery_v7.img</code> 刷入。
+硬重启方式：TWRP 的 reboot 会弹 GUI 确认页卡住，实测有效的是写 <code>misc</code> 的
+<code>boot-recovery</code> BCB + <code>echo b > /proc/sysrq-trigger</code>。</div>
+
+<h2>七、待确认项（不猜测）</h2>
+<ol>
+  <li><strong>源码编译环境（唯一阻塞项）</strong>：三选一即可，选定后 <code>build/compile_twrp.sh</code> 由我执行、不需要你碰编译：
+      ① 把 <code>wsl.exe</code> 从「安全中心 → 命令安全 → 程序黑名单」移除（最直接）；
+      ② 启动那台 Ubuntu VM 并给我 guest 账号/密码；
+      ③ 提供一台可访问、有 ≥150 GB 空闲的 Linux 主机。同时需保证 <code>repo sync</code> 的 40–60 GB 下载链路可用。</li>
+  <li><strong>设备锁屏密码类型</strong>（PIN / 图案 / 密码 / 仅滑动）：编译出的 TWRP 会弹密码框，
+      这一步是屏幕输入，命令行替代不了；仅滑动则用默认密码自动解。</li>
+  <li><strong>「其他 bug」的具体表现</strong>：现象、时机、报错文字。我只定位到已确认的错配，不替你猜症状。</li>
+  <li><strong>需要覆盖的 OTA 版本清单</strong>（你说不固定），或确认「以后按版本各出一包」。</li>
+  <li><strong>是否要做 /data 只读备份</strong>：可选，全程不改数据；不做也不影响适配。</li>
+</ol>
+<p><strong>始终成立</strong>：<code>/data</code> 数据完好（系统侧 <code>/data/media/0</code> 95 个正常条目，TWRP 侧乱码只是 CE 密钥未派生），
+<strong>不要点 Format Data / Wipe Data</strong>；不依赖解密的备份方式是在系统里用 root 打包到电脑。
+当前分区是 v7，若需回退原厂 TWRP：
+<code>flash_recovery.ps1 -Image device_dump\y52s_dump_20261108_122327\images\recovery.img</code>。</p>
+<p>我已做完：源码级定位、环境探测、可编译工程与 prebuilt 提取、二进制移植的全链路验证与证伪、
+v8/v9/v10 三版定向构建与刷入、每次分区回读校验、最后回退到稳定 v7。
+剩下的只有「Linux 环境」和「输锁屏密码」两件事。</p>
+
+<h2>八、20:20 追加 — 用 GitHub Actions 云端编译（本机不用下几十 G）</h2>
+
+<h3>8.1 直接回答</h3>
+<div class="block"><strong>本机不需要下载几十 G</strong>：<code>repo sync</code> 的 40–60 GB 全部发生在 GitHub 的 runner 上。
+本机只做两件小事：推一个 <strong>24.3 MB</strong> 的仓库（<code>.github/</code> + <code>device/vivo/y52s/</code>，含 25 MB prebuilt），
+构建完再下载一个约 40–100 MB 的 <code>recovery.img</code>。
+<strong>但「几十 G 的下载」并没有消失，只是换成了 GitHub 的带宽和磁盘</strong>——不用你的网络、不用你的硬盘、不占 WSL/Docker。</div>
+
+<h3>8.2 云端 runner 到底放得下吗（2026 实测规格）</h3>
+<table>
+  <tr><th>项</th><th>数值</th><th>对 TWRP 编译的影响</th></tr>
+  <tr><td>CPU / 内存</td><td><code>ubuntu-24.04</code>：4 vCPU / 16 GB</td><td>用 <code>-j4</code>，避免 OOM</td></tr>
+  <tr><td>根分区 <code>/</code></td><td><code>/dev/root 72G</code>，可用约 19–25 G；删预装 dotnet / Android SDK / GHC / CodeQL 可再腾 20–30 G</td><td>放系统工具足够</td></tr>
+  <tr><td>第二块盘 <code>/mnt</code></td><td><code>/dev/sda1 74G</code>，可用约 <strong>66 G</strong></td><td><strong>源码树 + out/ 全部放这里</strong>，这是能编成的关键</td></tr>
+  <tr><td>单 job 上限</td><td>6 小时（本工作流设 350 分钟）</td><td><code>repo sync</code> + <code>mka recoveryimage</code> 通常 2–4 小时，有余量</td></tr>
+  <tr><td>免费额度</td><td>2,000 分钟/月、缓存 10 GB/仓库</td><td>一次完整构建够用；不要频繁重跑</td></tr>
+  <tr><td>可行性佐证</td><td><code>Action-TWRP-Builder</code> 等公开工作流记录「TWRP 5.X~12.X 全部编译成功」「2022/05/29 起支持 Android 11 源码」</td><td>不是理论推测</td></tr>
+</table>
+
+<h3>8.3 已落地文件</h3>
+<table>
+  <tr><th>文件</th><th>内容</th></tr>
+  <tr><td><code>.github/workflows/build-twrp.yml</code></td><td>13 步：清磁盘 → 准备 <code>/mnt</code> → JDK 11 / 依赖 → <code>repo init -b twrp-11 --depth=1</code> → 放入本机 device tree → 校验 <code>TW_INCLUDE_CRYPTO/FBE</code> 真的存在 → <code>repo sync -c -j4</code> → <code>lunch omni_y52s-eng</code> + <code>mka recoveryimage -j4</code> → 头参数校验 + sha256 → 上传 artifact（保留 30 天）。YAML 已解析校验。</td></tr>
+  <tr><td><code>.gitignore</code></td><td>排除 <code>device_dump/</code>(165 MB)、<code>build/reference/</code>(161 MB)、三个 96 MB 镜像、<code>src/</code>、<code>.workbuddy/</code> 及所有密钥类文件 → 推送体积实测 <strong>24.3 MB / 16 个文件</strong>。</td></tr>
+</table>
+<p><strong>分支仍是 <code>twrp-11</code></strong>（第 6.4 节的证据）：12.1 的 keystore2 会重演 v10 的卡死。工作流里加了断言，
+构建前会检查 <code>BoardConfig.mk</code> 里两个 crypto 宏是否真的为 <code>true</code>，防止误用旧配置。</p>
+<p>产物回到本机后，<strong>ramdisk 后处理（rc 路径、默认关 MTP、AVB 布局）与命令刷仍由我完成</strong>，
+不需要你碰编译或打包。编译产物是原始 <code>recovery.img</code>，不是补齐到 96 MB 的分区镜像，正好适配
+<code>flash_recovery.ps1</code> 的自动补零流程。</p>
+
+<h3>8.4 需要你做的（只有账号授权）</h3>
+<p>本机没有 <code>gh</code> CLI、也没有可用的 GitHub 推送凭据，所以「创建仓库 + 推送」这一步必须在<strong>你自己的 GitHub 账号</strong>下完成；
+我不需要、也不会索取你的 token。最省事的两步：</p>
+<ol>
+  <li>GitHub 新建一个空仓库（例如 <code>y52s-twrp-build</code>），把本目录推上去：
+      <div class="cmd">git init && git add . && git commit -m "y52s twrp-11 build"
+git remote add origin <你的仓库地址> && git push -u origin main</div>
+      推送内容就是那 24.3 MB；<code>.gitignore</code> 已确保大文件或密钥不会上去。</li>
+  <li>推送会自动触发 workflow（也可在 Actions 页手动 <em>Run workflow</em>）。跑完把 artifact 里的
+      <code>recovery.img</code> 下载到 <code>build/</code>，告诉我一声，剩下的由我接着做。</li>
+</ol>
+<p><strong>已知风险（不隐瞒）</strong>：<code>omni_y52s.mk</code> 继承 <code>vendor/omni/config/common.mk</code>，
+需确认 <code>twrp-11</code> minimal manifest 含 <code>android_vendor_omni</code>；若首次构建在 lunch 阶段报缺该仓库，
+我会按日志加一条 local manifest，不需要你判断。6 小时上限若不够，再把 job 拆成 sync / build 两段并缓存源码。</p>
+
+<div class="foot">唯一入口：本文件。配置 <code>device/vivo/y52s/</code>，上游对照 <code>reference/</code>，
+证据 <code>device_dump/</code>，命令刷 <code>flash/</code>，云端编译 <code>.github/workflows/</code>。未列出来源的参数保持 PENDING。</div>
+</div>
+</body>
+</html>

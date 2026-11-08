@@ -1,0 +1,168 @@
+# ===========================================================================
+# y52s (V2057A / PD2057) - build TWRP with FBE decryption on GitHub Actions.
+#
+# WHY A CLOUD BUILD:
+#   The local Windows host has no usable Linux: wsl.exe is blocked by security
+#   policy, Docker daemon is down, the VMware Ubuntu VM has no guest creds,
+#   and the link cannot sustain a 40-60 GB `repo sync`. GitHub's runner does
+#   the syncing instead; this machine only pushes ~25 MB and pulls back one
+#   ~40-100 MB recovery.img.
+#
+# WHY twrp-11 (NOT twrp-12.1):
+#   This device is Android 10. Its FBE stack is the old android.security.keystore
+#   + HIDL keymaster@4.0 / gatekeeper@1.0. TeamWin android-11 crypto/fscrypt/
+#   Decrypt.cpp uses exactly that API and has NO keystore2 reference. We already
+#   proved (locally, v10) that a 12.1 TWRP binary hangs forever at
+#   "Attempting to initialize DEKeys" because this device has no
+#   android.system.keystore2.IKeystoreService/default. DO NOT change the branch.
+#
+# RUNNER CAPACITY (measured in the wild, 2026):
+#   ubuntu-24.04: 4 vCPU / 16 GB RAM / /dev/root 72G (19-25G free)
+#                 + /dev/sda1 74G on /mnt (66G free), 6 h job limit.
+#   We free preinstalled toolchains, then put the ENTIRE source tree and out/
+#   on /mnt. Use -j4 (4 vCPU) to stay within 16 GB RAM.
+# ===========================================================================
+name: Build TWRP 11 for vivo Y52s
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-twrp.yml'
+      - 'device/vivo/y52s/**'
+
+# A second manual run must not fight the previous one for the release.
+concurrency:
+  group: y52s-twrp-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+
+    env:
+      TWRP_WORK: /mnt/twrp
+      MANIFEST: https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git
+      BRANCH: twrp-11
+      DEVICE_PATH: device/vivo/y52s
+      LUNCH_TARGET: omni_y52s-eng
+      USE_CCACHE: 1
+      CCACHE_DIR: /mnt/ccache
+      CCACHE_MAXSIZE: 20G
+
+    steps:
+      - name: Checkout this (small) repository
+        uses: actions/checkout@v4
+
+      - name: Show disk before cleanup
+        run: df -h
+
+      - name: Free disk + prepare /mnt
+        run: |
+          set -e
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+          sudo docker image prune --all --force || true
+          sudo mkdir -p /mnt/twrp /mnt/ccache
+          sudo chown -R "$USER" /mnt/twrp /mnt/ccache
+          df -h
+          echo "free on /mnt: $(df -h /mnt | tail -1)"
+
+      - name: JDK 11 (Android 11 baseline)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+
+      - name: Build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            git-core gnupg flex bison build-essential zip curl \
+            zlib1g-dev libncurses-dev libssl-dev libxml2-utils xsltproc \
+            unzip fontconfig python3 python3-pip ccache bc rsync \
+            libgl1-mesa-dev libx11-dev lib32z1-dev || true
+          python3 --version
+          java -version
+
+      - name: Install repo
+        run: |
+          mkdir -p "$HOME/bin"
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo \
+            -o "$HOME/bin/repo"
+          chmod +x "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: repo init (twrp-11, depth=1)
+        working-directory: /mnt/twrp
+        run: |
+          "$HOME/bin/repo" init --depth=1 -u "$MANIFEST" -b "$BRANCH"
+          df -h /mnt
+
+      - name: Install the y52s device tree
+        run: |
+          set -e
+          mkdir -p "$TWRP_WORK/device/vivo"
+          rm -rf "$TWRP_WORK/$DEVICE_PATH"
+          cp -a "$GITHUB_WORKSPACE/$DEVICE_PATH" "$TWRP_WORK/$DEVICE_PATH"
+          echo "--- crypto flags that MUST be present ---"
+          grep -nE '^TW_INCLUDE_(CRYPTO|FBE) :=' \
+            "$TWRP_WORK/$DEVICE_PATH/BoardConfig.mk"
+          grep -q '^TW_INCLUDE_CRYPTO := true' "$TWRP_WORK/$DEVICE_PATH/BoardConfig.mk"
+          grep -q '^TW_INCLUDE_FBE := true' "$TWRP_WORK/$DEVICE_PATH/BoardConfig.mk"
+          echo "--- prebuilt (measured from the real device) ---"
+          ls -lh "$TWRP_WORK/$DEVICE_PATH/prebuilt/"
+
+      - name: repo sync
+        working-directory: /mnt/twrp
+        run: |
+          "$HOME/bin/repo" sync -c -j4 --force-sync --no-clone-bundle --no-tags
+          df -h /mnt
+          du -sh /mnt/twrp
+
+      - name: Build recoveryimage
+        working-directory: /mnt/twrp
+        run: |
+          set -e
+          . build/envsetup.sh
+          lunch "$LUNCH_TARGET"
+          ccache -M "$CCACHE_MAXSIZE" || true
+          mka recoveryimage -j4
+          df -h /mnt
+          ls -lh "out/target/product/y52s/recovery.img"
+
+      - name: Verify the produced image
+        run: |
+          set -e
+          IMG="$TWRP_WORK/out/target/product/y52s/recovery.img"
+          python3 - "$IMG" <<'PY'
+          import sys, struct
+          b = open(sys.argv[1], 'rb').read(4096)
+          assert b[:8] == b'ANDROID!', 'not an Android boot image'
+          v = struct.unpack_from('<10I', b, 8)
+          print('header_version=%d page_size=%d kernel_size=%d ramdisk_size=%d'
+                % (v[8], v[7], v[0], v[2]))
+          PY
+          sha256sum "$IMG" | tee "$TWRP_WORK/out/target/product/y52s/recovery.img.sha256"
+
+      - name: Upload recovery.img
+        uses: actions/upload-artifact@v4
+        with:
+          name: y52s-twrp11-recovery
+          path: |
+            /mnt/twrp/out/target/product/y52s/recovery.img
+            /mnt/twrp/out/target/product/y52s/recovery.img.sha256
+          retention-days: 30
+          compression-level: 6
+
+      - name: Build summary
+        if: always()
+        run: |
+          echo "### y52s TWRP 11 build" >> "$GITHUB_STEP_SUMMARY"
+          echo "- manifest: \`$BRANCH\` (keystore2-free, matches Android 10 FBE)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- lunch: \`$LUNCH_TARGET\`" >> "$GITHUB_STEP_SUMMARY"
+          df -h /mnt >> "$GITHUB_STEP_SUMMARY"
