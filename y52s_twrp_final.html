@@ -507,6 +507,61 @@ prop: security_patch=2023-02-01 / vendor=2020-07-05 / persist.sys.usb.config=adb
 连上后告诉我，我立刻读 <code>recovery.log</code> 判断解密流程走到哪一步，再按结果一次性写完 ramdisk 后处理（版本属性、HAL 服务、MTP 拦截、AVB 布局）并重刷。
 若新镜像起不来，一条命令回退 v7：<code>flash_recovery.ps1 -Image .\build\recovery_v7.img</code>。数据始终完好，别点 Format Data。</div>
 
+<h2>十一、23:58 追加 — 编译版 TWRP「没触摸」：根因与修复</h2>
+
+<h3>11.1 现象与定位（全部来自镜像逐字比对，非推测）</h3>
+<p>你说「编译的 TWRP 没触摸」。两份镜像的 <strong>kernel 字节完全一致</strong>（sha256 <code>c2cda2f291f8f763…</code>，
+16817288 B），所以触摸驱动本身没问题，差异全在 ramdisk：</p>
+<table>
+  <tr><th>条目</th><th>v7（触摸正常）</th><th>CI 编译版</th></tr>
+  <tr><td><code>init.recovery.mt6853.rc</code></td><td>1850 B</td><td><strong>缺失</strong></td></tr>
+  <tr><td><code>init.recovery.touch.rc</code></td><td>7817 B（sysfs 触摸节点权限）</td><td><strong>缺失</strong></td></tr>
+  <tr><td><code>system/bin/vts_app_recovery</code></td><td>108712 B</td><td><strong>缺失</strong></td></tr>
+  <tr><td><code>vendor/firmware/*</code></td><td>14 个 / 2930969 B（含 <code>touch_firmwares_recovery.bin</code> 与 5 个 <code>TP-FW-PD2057-*.bin</code>）</td><td><strong>0 个</strong>（只有 <code>odm/firmware</code> 空目录）</td></tr>
+  <tr><td><code>init.recovery.svc.rc / platform.rc</code></td><td>含 keymaster / gatekeeper 服务</td><td><strong>缺失</strong></td></tr>
+</table>
+<p><strong>为什么会丢</strong>：CI 的 <code>init.rc</code> 里有 <code>import /init.recovery.${ro.hardware}.rc</code>，
+而本机 <code>ro.hardware=mt6853</code>（实测 <code>getprop.all.txt</code>）——也就是要加载 <code>init.recovery.mt6853.rc</code>，
+它再 <code>import /init.recovery.touch.rc</code>、并在 <code>twrp.modules.loaded=true</code> 时
+<code>start touchupdate</code>（<code>/system/bin/vts_app_recovery --update</code>）。
+工程里<strong>根本没有 <code>recovery/root/</code> 目录</strong>，<code>device.mk</code> 也没有 <code>PRODUCT_COPY_FILES</code>，
+这套上游设备专属内容没进镜像，整条触摸固件初始化链断裂，import 落空。</p>
+
+<h3>11.2 已落地的修复（<code>build/postprocess_ci.py</code>）</h3>
+<div class="cmd">源 build/recovery_ci.img → 产物 build/recovery.img  sha256 3289b500713e9095a24381c21d2574cc5ee4cb14b0eb9155360984e926d701f5
+注入 18 项（3047818 B，全部从 v7 逐字复制）；cpio 3530 → 3549 项
+kernel / 8 MiB recovery_dtbo / dtb / AVB vbmeta blob 字节一致；vbmeta 重定位 0x2c6a000 → 0x2dcc800</div>
+<ul>
+  <li><strong>触摸</strong>：补回 <code>init.recovery.touch.rc</code>、<code>vts_app_recovery</code>、14 个触摸/WiFi 固件；
+      新建 <code>init.recovery.mt6853.rc</code>，含 <code>service touchupdate</code> 与 <code>on init</code> /
+      <code>twrp.modules.loaded</code> 双触发，由 CI 原有的 <code>${ro.hardware}</code> import 自动加载。</li>
+  <li><strong>顺带保留 v7 已验证的修复</strong>：<code>y52s_prepare / y52s_keymaster / y52s_gatekeeper</code> 服务定义、
+      <code>recovery.service=1</code>、<code>prop.default</code> 12 行版本属性改为 <code>10 / 29</code>（安全补丁已是实测值）、
+      <code>init.recovery.usb.rc</code> 追加 MTP 拦截（让 adb 默认可用）。</li>
+  <li><strong>不动的东西</strong>：kernel、8 MiB recovery_dtbo、dtb、AVB footer/vbmeta blob 全部原样；
+      CI 自带的 HIDL 库保持原版（没有混入 v7 的 Android 10 版本）；没有改 fstab、没有碰 <code>/data</code>。</li>
+</ul>
+<p><code>init.rc</code> 里 <code>import /init.recovery.vold_decrypt.rc</code> 仍落空，但 CI ramdisk 里
+<strong>没有 <code>/system/bin/vold</code></strong>（TWRP 11 自带 <code>libtwrpfscrypt.so</code> 实现 FBE），
+该 rc 只定义 <code>service sys_vold</code>，对这台设备无用，<strong>不补也不影响</strong>。</p>
+
+<h3>11.3 治本（以后云端编译自带触摸）</h3>
+<p>已把 17 个设备专属文件 + <code>init.recovery.mt6853.rc</code> 写入
+<code>device/vivo/y52s/recovery/root/</code>。TWRP/Omni 构建会自动把该目录合并进 recovery ramdisk
+（v7 里那些 <code>init.recovery.*.rc</code> 就是上游这么进去的），因此下一次 CI 编译出来的镜像
+<strong>不再需要本地补触摸</strong>，只剩版本属性仍由 <code>postprocess_ci.py</code> 对齐。</p>
+
+<h3>11.4 当前阻塞：设备 USB 离线</h3>
+<div class="block">修复镜像 <code>build/recovery.img</code>（<code>3289b500…</code>）已生成并通过离线校验，
+<strong>但还没刷入</strong>：本机 <code>adb devices</code> / <code>fastboot devices</code> / Windows PnP
+全部看不到 Android 设备（只有无关的 <code>USB\VID_13D3&amp;PID_56A2</code>），连续三次复查均如此。
+<br><br><strong>需要你做一次物理操作</strong>：把数据线重新插上；若停在没触摸的 TWRP，用<strong>音量键 + 电源键</strong>
+（TWRP 支持按键导航）选 <code>Reboot → System</code> 回系统，系统里 adb 可用；或长按电源强制重启后插线。
+连上后我立刻刷入、硬重启，并用 <code>getevent -il</code> / <code>/proc/bus/input/devices</code> /
+<code>recovery.log</code> 验证触摸设备是否出现，不再靠静态推断。
+<br><br>回退仍是一条命令：<code>flash_recovery.ps1 -Image .\build\recovery_v7.img</code>。
+数据始终完好，⚠️ 不要点 Format Data。</div>
+
 <div class="foot">唯一入口：本文件。配置 <code>device/vivo/y52s/</code>，上游对照 <code>reference/</code>，
 证据 <code>device_dump/</code>，命令刷 <code>flash/</code>，云端编译 <code>.github/workflows/</code>，
 产物取证 <code>build/inspect_ci_image.py</code>。未列出来源的参数保持 PENDING。</div>

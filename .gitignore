@@ -14,6 +14,7 @@ build/*
 !build/inspect_reference.py
 !build/fetch_parallel.py
 !build/inspect_ci_image.py
+!build/postprocess_ci.py
 
 # Never upload secrets, credentials or private keys.
 *.pem

@@ -11,3 +11,5 @@
 *.gz    binary
 *.vmdk  binary
 device/vivo/y52s/prebuilt/kernel binary
+device/vivo/y52s/recovery/root/system/bin/vts_app_recovery binary
+device/vivo/y52s/recovery/root/vendor/firmware/*.bin binary
