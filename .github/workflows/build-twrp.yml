@@ -29,7 +29,8 @@ on:
   push:
     branches: [main]
     paths:
-      - '.github/workflows/build-twrp.yml'
+      # Only device-tree changes need a rebuild. Workflow/CI edits must NOT
+      # auto-trigger another 30-60 min sync + 33 min compile; use Run workflow.
       - 'device/vivo/y52s/**'
 
 # A second manual run must not fight the previous one for the release.
@@ -50,7 +51,10 @@ jobs:
       LUNCH_TARGET: omni_y52s-eng
       USE_CCACHE: 1
       CCACHE_DIR: /mnt/ccache
-      CCACHE_MAXSIZE: 20G
+      # actions/cache allows 10 GB per repository (7-day LRU eviction).
+      # Keep ccache comfortably under that; the 40-60 GB source tree does
+      # not fit and still has to be synced each run.
+      CCACHE_MAXSIZE: 8G
 
     steps:
       - name: Checkout this (small) repository
@@ -69,6 +73,17 @@ jobs:
           sudo chown -R "$USER" /mnt/twrp /mnt/ccache
           df -h
           echo "free on /mnt: $(df -h /mnt | tail -1)"
+
+      # Only ccache fits in the 10 GB/repo cache budget. A warm cache turns the
+      # ~33 min compile mostly into cache hits + relinking; repo sync still runs.
+      - name: Restore ccache
+        id: ccache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: /mnt/ccache
+          key: ${{ runner.os }}-twrp11-ccache-${{ hashFiles('device/vivo/y52s/**') }}
+          restore-keys: |
+            ${{ runner.os }}-twrp11-ccache-
 
       - name: JDK 11 (Android 11 baseline)
         uses: actions/setup-java@v4
@@ -161,6 +176,16 @@ jobs:
           df -h /mnt
           ls -lh "out/target/product/y52s/recovery.img"
 
+      # restore/save split + always(): a build that fails downstream still
+      # keeps its compiler cache for the next run. Duplicated keys are harmless.
+      - name: Save ccache
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: /mnt/ccache
+          key: ${{ steps.ccache-restore.outputs.cache-primary-key }}
+
       - name: Verify the produced image
         continue-on-error: true
         run: |
@@ -199,4 +224,8 @@ jobs:
           echo "### y52s TWRP 11 build" >> "$GITHUB_STEP_SUMMARY"
           echo "- manifest: \`$BRANCH\` (keystore2-free, matches Android 10 FBE)" >> "$GITHUB_STEP_SUMMARY"
           echo "- lunch: \`$LUNCH_TARGET\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- ccache (8G cap, 10 GB/repo cache limit):" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          ccache -s >> "$GITHUB_STEP_SUMMARY" 2>&1 || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
           df -h /mnt >> "$GITHUB_STEP_SUMMARY"

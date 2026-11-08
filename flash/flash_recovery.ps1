@@ -46,6 +46,8 @@ function Invoke-Adb {
 Write-Host "adb    : $AdbPath"
 Write-Host "serial : $Serial"
 Write-Host "image  : $Image"
+$sw = [System.Diagnostics.Stopwatch]::StartNew()
+function Elapsed { "{0:n1}s" -f $sw.Elapsed.TotalSeconds }
 
 # --- [1] connection + root -------------------------------------------------
 $list = (& $AdbPath devices 2>&1 | Out-String)
@@ -100,7 +102,7 @@ $sumFile = Join-Path $env:TEMP "y52s_recovery.sha256"
 [System.IO.File]::WriteAllBytes($padded, $buf)
 $sha = (Get-FileHash $padded -Algorithm SHA256).Hash.ToLower()
 Set-Content -Path $sumFile -Value "$sha  recovery.img" -Encoding ascii
-Write-Host "[3/5] padded to $PartSize B, sha256 $sha"
+Write-Host ("[3/5] padded to $PartSize B, sha256 $sha  [t+{0}]" -f (Elapsed))
 
 # --- [4] push as files, then run (no inline quoting) ----------------------
 # TWRP: /data is not decrypted, so /data/local/tmp is unwritable -> use /tmp.
@@ -114,7 +116,7 @@ $code = Invoke-Adb @("push", $padded, "$remoteDir/y52s_recovery.img")
 if ($code -ne 0) { throw "push recovery.img failed" }
 $code = Invoke-Adb @("push", $sumFile, "$remoteDir/y52s_recovery.sha256")
 if ($code -ne 0) { throw "push sha256 failed" }
-Write-Host "[4/5] payload pushed"
+Write-Host ("[4/5] payload pushed  [t+{0}]  (progress bar jumps are adb's display, not a hang)" -f (Elapsed))
 
 # --- [5] write + verify ----------------------------------------------------
 $out = (& $AdbPath -s $Serial shell sh "$remoteDir/y52s_flash.sh" $remoteDir 2>&1 | Out-String)
@@ -122,5 +124,5 @@ Write-Host $out.Trim()
 if ($out -notmatch "OK - partition sha256 matches") {
     throw "Write/verify failed. Restore with device_dump/.../images/recovery.img using the same script (-Image)."
 }
-Write-Host "[5/5] DONE - only the recovery partition was written; /data untouched."
+Write-Host ("[5/5] DONE - only the recovery partition was written; /data untouched.  [total {0}]" -f (Elapsed))
 Write-Host "Reboot into recovery when you are ready: adb reboot recovery"

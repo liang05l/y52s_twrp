@@ -28,10 +28,19 @@ EXPECT=$(cut -d ' ' -f1 < "$SUM" 2>/dev/null)
 
 echo "I: target = $PART ($(readlink -f "$PART" 2>/dev/null))"
 echo "I: writing ONLY the recovery partition; /data is not touched"
-dd if="$IMG" of="$PART" bs=4096 2>/dev/null || { echo "E: dd failed"; exit 1; }
+
+# Timing: the old bs=4096 meant 24576 tiny writes for 96 MB, then sync, then
+# a full 96 MB read-back for sha256 -- that is the visible "stall" on flash.
+# 1 MiB blocks cut the write syscalls ~256x; keep sync + full verification.
+T0=$(date +%s 2>/dev/null || echo 0)
+dd if="$IMG" of="$PART" bs=1048576 2>/dev/null || { echo "E: dd failed"; exit 1; }
+T1=$(date +%s 2>/dev/null || echo 0)
 sync
+T2=$(date +%s 2>/dev/null || echo 0)
 
 GOT=$(sha256sum "$PART" 2>/dev/null | cut -d ' ' -f1)
+T3=$(date +%s 2>/dev/null || echo 0)
+echo "I: timing: dd=$((T1-T0))s sync=$((T2-T1))s verify=$((T3-T2))s"
 [ "$GOT" = "$EXPECT" ] || { echo "E: verify failed ($GOT != $EXPECT)"; exit 1; }
 echo "I: OK - partition sha256 matches. /data untouched."
 exit 0
