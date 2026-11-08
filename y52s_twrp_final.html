@@ -463,6 +463,50 @@ No files were found with the provided path: /mnt/build.log. No artifacts will be
   <li>设备当前仍是 v7：<code>sys.usb.config=adb</code>、HAL running、GUI 正常，可随时继续调试。</li>
 </ul>
 
+<h2>十、23:50 追加 — 刷入卡顿、GitHub 缓存、CI 产物取证</h2>
+
+<h3>10.1 刷入时为什么「卡一会」（已定位并优化）</h3>
+<p>不是脚本死，是四段串行 I/O 叠在一起：</p>
+<table>
+  <tr><th>阶段</th><th>原来的耗时点</th><th>处理</th></tr>
+  <tr><td>PowerShell 准备</td><td>96 MB 读入内存 → 补零到 100663296 B → 写临时文件 → <code>Get-FileHash</code></td><td>保留（完整性校验不能省），加时间戳输出</td></tr>
+  <tr><td><code>adb push</code></td><td>实测 74.6 MB/s ≈ 1.3 s；进度条从 38% 直接跳 86%，<strong>视觉上像卡住</strong></td><td>加提示文字说明是 adb 进度显示</td></tr>
+  <tr><td><strong>设备侧 <code>dd</code></strong></td><td><code>bs=4096</code> 写 96 MB = <strong>24576 次 4 KB 写</strong></td><td><strong>改为 <code>bs=1048576</code></strong>，约 96 次写，系统调用减少约 256 倍</td></tr>
+  <tr><td><code>sync</code> + 回读校验</td><td>等待脏页落盘 + <code>sha256sum</code> 再读整块 96 MB</td><td>保留（安全底线），新增 <code>dd / sync / verify</code> 分段秒数</td></tr>
+</table>
+<p>现在刷入会打印 <code>[3/5] ... [t+…]</code>、<code>[4/5] ... [t+…]</code>、<code>I: timing: dd=Xs sync=Ys verify=Zs</code>、<code>[total …]</code>，
+哪一段慢一目了然，不再是黑盒停顿。改动已提交 <code>bd733e1</code>。</p>
+
+<h3>10.2 GitHub 能不能靠缓存加快第二次编译：能，但只能缓存 ccache</h3>
+<table>
+  <tr><th>项</th><th>结论（2026 官方限制）</th></tr>
+  <tr><td><code>actions/cache</code> 容量</td><td><strong>10 GB / 仓库</strong>；7 天未访问自动清除；超限按 LRU 淘汰</td></tr>
+  <tr><td>源码树（40–60 GB）</td><td><strong>装不下</strong>，<code>repo sync</code> 那段无法省掉；只有 self-hosted runner 的持久磁盘或付费 larger runner 才能免 sync</td></tr>
+  <tr><td>ccache（编译缓存）</td><td><strong>能</strong>。已把 <code>CCACHE_MAXSIZE</code> 从 20G 降到 <strong>8G</strong> 以适配 10 GB 上限，新增 <code>Restore ccache</code>（key 含 device tree hash）与 <code>Save ccache</code></td></tr>
+  <tr><td>失败时也保存</td><td>用 <code>cache/restore</code> + <code>cache/save</code> 分离，save 设 <code>if: always()</code>——第二次运行那种「编译成功但 job 失败」不会再丢缓存</td></tr>
+  <tr><td>预期效果</td><td>源码不变时，33 分钟编译大部分变成命中 + 重新链接（社区同类构建 warm build 通常降到 10–40 分钟）；<code>Build summary</code> 会打印 <code>ccache -s</code> 命中率</td></tr>
+  <tr><td>避免误触发</td><td><code>push.paths</code> 收窄为只 <code>device/vivo/y52s/**</code>；改 workflow 本身不再自动触发又一轮 30–60 分钟 sync + 33 分钟编译，需要时手动 <em>Run workflow</em></td></tr>
+</table>
+
+<h3>10.3 CI 产物取证结论（<code>build/recovery_ci.img</code>，sha256 <code>16867764…</code>）</h3>
+<div class="cmd">CRYPTO: no_crypto_support=False  decrypting_user_fbe=True  keystore2=False
+system/bin/recovery = 1,185,200 B   |   cpio 3530 项
+fstab: /data ... flags=display=data;fileencryption=aes-256-xts
+prop: security_patch=2023-02-01 / vendor=2020-07-05 / persist.sys.usb.config=adb</div>
+<p><strong>这正是要的基线</strong>：带 FBE 解密、走 HIDL keystore，不会重演 v10 的 keystore2 卡死；版本属性也按实测值生成。
+但结构与 v7 差异明显：<code>init.recovery.platform.rc</code> / <code>svc.rc</code> 不在镜像里（上游 <code>recovery/root/</code> 未进我们的 device tree），
+所有 <code>.rc</code> 里 <strong>0 条 keymaster/gatekeeper 服务声明</strong>；<code>init.rc</code> 却 import <code>init.recovery.vold_decrypt.rc</code>。
+另外 <code>prop.default</code> 是 Android 11 基线（<code>sdk=30 / release=11</code>），而设备是 Android 10——v5 已实测版本不匹配会影响 keymaster 派生 CE 密钥。
+这些都需要按真机回显做定向后处理，不静态臆造。</p>
+
+<h3>10.4 当前状态：设备 USB 离线，需要你做一次物理操作</h3>
+<div class="block">CI 镜像已原样刷入并回读 sha256 一致，随后用 <code>misc</code> BCB + <code>sysrq</code> 硬重启。
+等待 125 秒后 <code>adb devices</code>、<code>fastboot devices</code>、Windows PnP <strong>全部看不到 Android 设备</strong>（只剩一个无关的 <code>VID_13D3</code> 复合设备）。
+最可能的原因是这版镜像<strong>没有 v7 的 MTP 拦截</strong>，TWRP 起来后把 USB 切到 MTP，adb 因此不可见——和你之前遇到的现象一样。
+<br><br><strong>请做一次</strong>：重新插一下数据线；若屏幕亮着就在 TWRP 里关掉 MTP；若黑屏则长按电源键强制重启。
+连上后告诉我，我立刻读 <code>recovery.log</code> 判断解密流程走到哪一步，再按结果一次性写完 ramdisk 后处理（版本属性、HAL 服务、MTP 拦截、AVB 布局）并重刷。
+若新镜像起不来，一条命令回退 v7：<code>flash_recovery.ps1 -Image .\build\recovery_v7.img</code>。数据始终完好，别点 Format Data。</div>
+
 <div class="foot">唯一入口：本文件。配置 <code>device/vivo/y52s/</code>，上游对照 <code>reference/</code>，
 证据 <code>device_dump/</code>，命令刷 <code>flash/</code>，云端编译 <code>.github/workflows/</code>，
 产物取证 <code>build/inspect_ci_image.py</code>。未列出来源的参数保持 PENDING。</div>
