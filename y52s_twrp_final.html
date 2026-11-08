@@ -377,8 +377,73 @@ git remote add origin <你的仓库地址> && git push -u origin main</div>
 需确认 <code>twrp-11</code> minimal manifest 含 <code>android_vendor_omni</code>；若首次构建在 lunch 阶段报缺该仓库，
 我会按日志加一条 local manifest，不需要你判断。6 小时上限若不够，再把 job 拆成 sync / build 两段并缓存源码。</p>
 
+<h2>九、详细步骤：从当前状态到解密成功</h2>
+
+<h3>9.1 背景与本次失败复盘（13:41 UTC 首次 CI 运行）</h3>
+<p>首次运行日志：</p>
+<div class="cmd">device/vivo/y52s/device.mk:5: error: _nic.PRODUCTS.[[device/vivo/y52s/omni_y52s.mk]]:
+"vendor/omni/config/common.mk" does not exist.
+dumpvars failed with: exit status 1
+Device y52s not found. Attempting to retrieve device repository from TeamWin Github ...</div>
+<p><strong>根因（已核实，不是猜）</strong>：<code>platform_manifest_twrp_aosp @ twrp-11</code> 的 <code>default.xml</code>
+<strong>不含任何 <code>vendor/</code> 项目</strong>；而 <code>platform_manifest_twrp_omni</code> 只有
+<code>5.1 / 8.1 / 10.0-deprecated</code>，<strong>没有 11 分支</strong>。
+<code>omni_y52s.mk</code> 却无条件继承 <code>vendor/omni/config/common.mk</code> → make 解析失败 → product 没注册 →
+<code>lunch</code> 找不到设备 → roomservice 去 TeamWin GitHub 找 <code>y52s</code>（当然找不到）。
+<code>Build sandboxing disabled due to nsjail error</code> 是 Android 11 构建的正常提示，与此无关。</p>
+<p><strong>为什么不用「clone 一份 vendor/omni」解决</strong>：拉了 <code>omnirom/android_vendor_omni @ android-11</code> 的
+<code>config/common.mk</code> 核对过，内容全是 Omni <strong>ROM system 分区</strong>的东西（开机动画、铃声、backuptool、
+privapp 权限、还引用 <code>frameworks/native/data/etc/...</code> 等 minimal 树里没有的文件），对 <code>recoveryimage</code> 毫无用处，
+<code>PRODUCT_COPY_FILES</code> 指向不存在的文件反而会引发新错误。
+<strong>正确修法：彻底去掉这个依赖</strong>，只保留 AOSP 自带的 <code>core_64_bit.mk</code> + <code>full_base_telephony.mk</code> + 本机 <code>device.mk</code>。</p>
+<div class="block"><strong>已修复并推送</strong>：移除 <code>omni_y52s.mk</code> 的 vendor/omni 继承、工作流加「断言不许再出现 vendor/* 继承」的回归检查、
+加 <code>mka</code> 缺失时回退 <code>make</code>、构建失败自动上传 <code>/mnt/build.log</code>。
+提交 <code>796a5b8</code> 已 push 到 <code>origin/main</code>（远端与本地一致），<strong>push 已自动触发新一轮构建</strong>。</div>
+
+<h3>9.2 逐条步骤（A 段：等构建；B 段：我处理；C 段：你只在屏幕上输密码）</h3>
+<table>
+  <tr><th>#</th><th>在哪 / 做什么</th><th>命令或操作</th><th>预期 / 失败时</th></tr>
+  <tr><td>1</td><td>GitHub 仓库 → <strong>Actions</strong> 页</td><td>看最上面那条新的 <code>Build TWRP 11 for vivo Y52s</code>（由刚才的 push 触发）</td><td>黄色圆点=运行中；若没出现，点 <em>Run workflow</em> 手动跑</td></tr>
+  <tr><td>2</td><td>展开 <code>Free disk + prepare /mnt</code></td><td>无需操作</td><td><code>df -h</code> 应显示 <code>/mnt</code> 约 66 G 可用</td></tr>
+  <tr><td>3</td><td>展开 <code>Install the y52s device tree</code></td><td>无需操作</td><td>打印 <code>TW_INCLUDE_CRYPTO := true</code>、<code>TW_INCLUDE_FBE := true</code> 和 kernel/dtb/dtbo 三个 prebuilt；缺任一即断言失败</td></tr>
+  <tr><td>4</td><td>展开 <code>Assert product makefile needs no vendor/omni</code></td><td>无需操作</td><td><strong>必须输出 <code>OK: product makefile is self-contained</code></strong>；这就是本次修复的检查点</td></tr>
+  <tr><td>5</td><td><code>repo sync</code></td><td>无需操作</td><td>约 30–60 分钟，<code>du -sh /mnt/twrp</code> 几十 G；GitHub 带宽，不占本机</td></tr>
+  <tr><td>6</td><td><code>Build recoveryimage</code></td><td>无需操作</td><td>约 1–2 小时，末尾 <code>ls -lh out/target/product/y52s/recovery.img</code>；失败会自动产出 <code>y52s-build-log</code></td></tr>
+  <tr><td>7</td><td><code>Verify the produced image</code> → <code>Upload recovery.img</code></td><td>无需操作</td><td>打印 header_version / page_size / kernel_size / ramdisk_size；生成 artifact <code>y52s-twrp11-recovery</code></td></tr>
+  <tr><td>8</td><td><strong>若任一步失败</strong></td><td>把该步骤最后 30 行贴给我，或下载 <code>y52s-build-log</code> 放到 <code>build/</code></td><td><strong>我按日志改文件 → commit → push → 自动重跑</strong>，不需要你判断原因</td></tr>
+  <tr><td>9</td><td>构建成功页底部 <strong>Artifacts</strong></td><td>下载 <code>y52s-twrp11-recovery</code>（zip）并解压</td><td>得到 <code>recovery.img</code> + <code>recovery.img.sha256</code></td></tr>
+  <tr><td>10</td><td>放到本机</td><td>复制为 <code>C:\Users\30345\WorkBuddy\y52s_rec\build\recovery_ci.img</code></td><td>告诉我一声即可</td></tr>
+  <tr><td>11</td><td><strong>由我执行</strong>：只读取证</td><td><code>python build/inspect_ci_image.py build/recovery_ci.img</code></td><td>报告头版本、压缩格式、cpio 关键文件、<code>no_crypto_support</code> / <code>decrypting_user_fbe</code> / <code>keystore2</code>、AVB footer；<strong>不猜任何偏移</strong></td></tr>
+  <tr><td>12</td><td><strong>由我执行</strong>：ramdisk 后处理</td><td>按第 11 步报告写针对性脚本（gatekeeper 路径、默认关 MTP、版本属性、AVB 布局、补零到 100663296 B + sha256）</td><td>离线验证通过后才刷</td></tr>
+  <tr><td>13</td><td><strong>由我执行</strong>：命令刷</td><td><code>powershell -ExecutionPolicy Bypass -File .\flash\flash_recovery.ps1 -Image .\build\recovery.img</code></td><td>校验 adb/root/版本 → 只 dd 到 recovery → 回读整分区 sha256；<strong>不碰 /data</strong></td></tr>
+  <tr><td>14</td><td><strong>由我执行</strong>：重启</td><td><code>printf 'boot-recovery' | dd of=/dev/block/by-name/misc bs=1 seek=0 conv=notrunc; sync</code><br><code>echo b &gt; /proc/sysrq-trigger</code></td><td>等 60–100 秒（MTK 启动慢），<code>adb devices</code> 显示 <code>recovery</code>；TWRP 自带的 reboot 会弹确认页卡住，<strong>不要用</strong></td></tr>
+  <tr><td>15</td><td><strong>唯一需要你在屏幕上做</strong></td><td>TWRP 弹出密码框后输 <strong>锁屏 PIN / 图案 / 密码</strong></td><td>只设滑动解锁则用默认密码自动解、不弹框；<strong>绝对不要点 Format Data / Wipe Data</strong></td></tr>
+  <tr><td>16</td><td>验收</td><td><code>adb shell "ls -1 /data/media/0 | head -10"</code> 交给我核对</td><td>出现 <code>DCIM / Download / Documents</code> 等正常目录名 = <strong>解密成功</strong>；仍是 base64 乱码 = 未拿到 CE 密钥，把日志给我</td></tr>
+  <tr><td>17</td><td>异常回退</td><td><code>flash_recovery.ps1 -Image .\build\recovery_v7.img</code></td><td>回到已验证可用的 v7（<code>0c60a727…</code>），数据不受影响</td></tr>
+</table>
+
+<h3>9.3 常见误区</h3>
+<ul>
+  <li><strong>别把 manifest 改成 <code>twrp-12.1</code></strong>：keystore2 AIDL 在本机 Android 10 上不存在，v10 已实测卡死在 <code>Attempting to initialize DE keys</code>。</li>
+  <li><strong>别 clone <code>vendor/omni</code> 来「补文件」</strong>：那是 Omni ROM 的 system 配置，会引入新的缺文件错误（见 9.1）。</li>
+  <li><strong>别用 <code>adb reboot recovery</code> / <code>twrp reboot recovery</code></strong>：TWRP 会弹 GUI 确认页，命令永远不落地；用 misc BCB + sysrq。</li>
+  <li><strong>别把 96 MB 分区镜像当编译产物</strong>：CI 产出的是原始 <code>recovery.img</code>，由 <code>flash_recovery.ps1</code> 自动补零。</li>
+  <li><strong>别点格式化</strong>：乱码只是 CE 密钥未派生，数据一直完好（系统侧 95 个正常条目）。</li>
+</ul>
+
+<h3>9.4 权衡与查漏</h3>
+<ul>
+  <li>免费额度 2,000 分钟/月、单 job 6 小时（工作流设 350 分钟）；本次 sync+build 约 2–4 小时。若超时，把 job 拆成 sync / build 两段并缓存源码。</li>
+  <li>若 <code>lunch</code> 之后仍报缺 <code>full_base_telephony.mk</code> 相关文件，按日志把它换成更精简的 <code>$(SRC_TARGET_DIR)/product/base.mk</code>——由我改，不预先臆造。</li>
+  <li>若 <code>recoveryimage</code> 报缺某些 <code>PRODUCT_COPY_FILES</code>，说明 minimal 树删了对应项目，按日志删该行或加 local manifest。</li>
+  <li>产物若自带 AVB footer，后处理需按新内容长度重定位 vbmeta 并同步 footer 字段（本机 v8 起已有可复用逻辑）。</li>
+  <li>工作流已加 <code>Upload build log on failure</code>，任何失败都能拿到 <code>/mnt/build.log</code>，不必靠猜。</li>
+  <li>设备当前仍是 v7：<code>sys.usb.config=adb</code>、HAL running、GUI 正常，可随时继续调试。</li>
+</ul>
+
 <div class="foot">唯一入口：本文件。配置 <code>device/vivo/y52s/</code>，上游对照 <code>reference/</code>，
-证据 <code>device_dump/</code>，命令刷 <code>flash/</code>，云端编译 <code>.github/workflows/</code>。未列出来源的参数保持 PENDING。</div>
+证据 <code>device_dump/</code>，命令刷 <code>flash/</code>，云端编译 <code>.github/workflows/</code>，
+产物取证 <code>build/inspect_ci_image.py</code>。未列出来源的参数保持 PENDING。</div>
 </div>
 </body>
 </html>

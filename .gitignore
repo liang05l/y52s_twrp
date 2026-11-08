@@ -13,6 +13,7 @@ build/*
 !build/extract_crypto_libs.py
 !build/inspect_reference.py
 !build/fetch_parallel.py
+!build/inspect_ci_image.py
 
 # Never upload secrets, credentials or private keys.
 *.pem
