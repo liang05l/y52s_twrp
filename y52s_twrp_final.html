@@ -953,11 +953,52 @@ on property:sys.usb.ffs.mtp.ready=0
   <tr><td>门控（设备侧脚本 <code>flash/test_mtp_gate.sh</code>）</td><td><code>decrypt=0 + ready=1</code> → 保持 <code>adb</code>（不会在解密前暴露 MTP）；<code>decrypt=1 + ready=1</code> → <code>mtp,adb</code>；<code>ready=0</code> → 回 <code>adb</code>；脚本自动恢复原状态</td></tr>
   <tr><td>BCB</td><td>硬重启后 <code>clear_bcb.sh</code> 已清为全 0，正常开机进系统</td></tr>
 </table>
-<div class="block"><strong>正确操作顺序（请照此验证）</strong>：进 TWRP → 输锁屏密码解密主用户 → 到 <strong>Mount</strong> 菜单点 <strong>Enable MTP</strong>。
+<div class="block"><strong>该「门控」方案已在第十七章证伪</strong>：<code>sys.usb.ffs.mtp.ready=1</code> 在本机永远不会被设置（TWRP 源码里只有 <code>Disable_MTP()</code> 会把它清零），
+所以 GUI 开关根本触发不了这个 action。下面这段操作顺序<strong>无效</strong>，保留仅作复盘。</div>
+<div class="block"><strong>当时的设想（已作废）</strong>：进 TWRP → 输锁屏密码解密主用户 → 到 <strong>Mount</strong> 菜单点 <strong>Enable MTP</strong>。
 此时 rc 才切到 <code>adb+MTP</code> 复合，MTP 服务基于<strong>已解密</strong>的视图枚举，电脑上应看到正常中文/英文目录名，adb 也仍在线。
 用完在 Mount 里 Disable MTP 即回到纯 adb；或重启 recovery 也回到纯 adb。
 ⚠️ 本次为验证又重启了一次，FBE 需重新输密码（当前 <code>twrp.user.0.decrypt=0</code>）。</div>
 <p>只想回到第十五章那种「开机就同时开」的状态，可刷 <code>build/recovery_decrypt_ok.img</code>（<code>77c350f8…</code>，纯 adb 无 MTP）或重新生成带无条件 action 的镜像；但那会重现乱码，不建议。</p>
+
+<h2>十七、17:50 追加 — MTP 的真实根因（源码级）、一次失败的运行时实验、当前需恢复设备</h2>
+
+<h3>17.1 源码证据：GUI 开关为什么只让电脑「响一下」</h3>
+<p>从 TWRP 12.1 <code>reference/twrp12/partitionmanager.cpp</code>（已下载到工程）读到 <code>TWPartitionManager::Enable_MTP()</code> / <code>Disable_MTP()</code> 原文：</p>
+<table>
+  <tr><th>动作</th><th>源码行为</th></tr>
+  <tr><td><code>Start MTP</code></td><td><code>property_set("sys.usb.config","none")</code> → 写 <code>/sys/class/android_usb/android0/idProduct</code>（<strong>本机是 configfs，此路径不存在</strong>）→ <code>property_set("sys.usb.config","mtp,adb")</code> → <code>twrpMtp::forkserver()</code> → <code>Add_All_MTP_Storage()</code> → <code>DataManager::SetValue("tw_mtp_enabled",1)</code></td></tr>
+  <tr><td><code>Stop MTP</code></td><td><code>property_set("sys.usb.ffs.mtp.ready","0")</code> → <code>sys.usb.config=none</code> → 杀 MTP 子进程 → <code>sys.usb.config=adb</code> → <code>tw_mtp_enabled=0</code></td></tr>
+</table>
+<p>而 Y73s 的 <code>init.recovery.mt6853.rc</code> 里配置 configfs 的动作写的是：</p>
+<pre>on property:sys.usb.config=mtp,adb &amp;&amp; property:sys.usb.configfs=1 \
+    &amp;&amp; property:sys.usb.ffs.mtp.ready=1 &amp;&amp; property:sys.usb.ffs.ready=1
+    symlink .../ffs.mtp .../f1 ; symlink .../ffs.adb .../f2 ; write idProduct 0x4ee2 ; write UDC</pre>
+<p><strong><code>sys.usb.ffs.mtp.ready=1</code> 在本机从没被设置过</strong>（实测一直是 <code>0</code>；源码里只有 <code>Disable_MTP()</code> 清零，没有任何地方置 1）。
+因此 GUI 设了 <code>sys.usb.config=mtp,adb</code>、USB 重新枚举（电脑响一下），但 configfs 的 <code>f1</code> 没被换成 <code>ffs.mtp</code>：
+取证回显 <code>f1</code> 为空、<code>f2 → ffs.adb</code>、<code>idProduct=0xd001</code>、<code>ffs.mtp.ready=0</code>，PnP 只有 <code>Android ADB Recovery Interface D001</code>。
+MTP 服务日志 <code>E:[MTP] request read returned -1, errno: 108/19</code> 正是 FunctionFS 端点没连上 gadget 的表现。</p>
+<p>同时这也说明：第十六章我加的 <code>on property:sys.usb.ffs.mtp.ready=1 &amp;&amp; decrypt=1</code> 门控<strong>永远不会触发</strong>，属于基于错误前提的修复，已作废。
+要彻底修好需要在 rc 里补一套不依赖 <code>ffs.mtp.ready</code> 的完整 configfs 切换（含 <code>sys.usb.config=adb</code> 的回退动作），或重编译 TWRP 让 <code>Enable_MTP()</code> 直接走 configfs。</p>
+
+<h3>17.2 一次失败的运行时实验（如实记录）</h3>
+<p>我写了 <code>flash/mtp_switch.sh</code> 想在当前会话直接改 configfs（断 UDC → 删 f1/f2 → 挂 <code>ffs.mtp</code>+<code>ffs.adb</code> → 重连 UDC）。
+但当时 MTP 服务已被用户点 <code>Stop MTP</code> 停掉，FunctionFS 没有写描述符，gadget 重连后无法 enable —— <strong>设备 USB 完全不枚举，adb / fastboot / PnP 全空</strong>。
+这是我的操作失误：在没有 MTP 服务运行时挂 <code>ffs.mtp</code> 并重连 UDC，顺序反了。该脚本<strong>禁止再直接使用</strong>，保留仅作取证。</p>
+
+<h3>17.3 当前状态与恢复步骤（需要你一次物理操作）</h3>
+<div class="block"><strong>设备目前离线</strong>：recovery 分区仍是 <code>a3855ed4…</code>（默认纯 adb、解密链完好），但 USB gadget 处于未 enable 状态。
+请<strong>长按电源 10 秒以上强制关机，再正常开机</strong>（系统 boot 分区完好）；或按住音量上+电源进 fastboot 告诉我。
+连上后我一条命令即可刷回<strong>已完整验证</strong>的 <code>build/recovery_decrypt_ok.img</code>（<code>77c350f8…</code>，纯 adb、触摸/解密/卡刷全正常），并核对分区哈希。</div>
+
+<h3>17.4 剩下两项的确切结论与可行路径</h3>
+<table>
+  <tr><th>项</th><th>结论</th><th>现在就能用的替代</th></tr>
+  <tr><td>user 999（应用分身）</td><td>真 PIN + 指定 USER ID 仍失败，走 <code>using secdis to decrypt spblob</code> 分支。是 Y73s 定制 <code>Decrypt_User_Synth_Pass</code> 对非 0 用户的实现缺陷，<strong>不是密码问题</strong>；换任何密码/改 props 都无效</td><td><code>flash/backup_user999.sh</code>：进系统后用 Magisk root 打包 <code>/data/user/999</code>、<code>/data/system_ce/999</code> 到 /sdcard 再 <code>adb pull</code>（脚本已落地，不打包 FBE 密钥）</td></tr>
+  <tr><td>MTP</td><td>GUI 开关受 <code>ffs.mtp.ready</code> 条件缺陷影响，configfs 不会切换；开机自动开则会因启动早于解密而显示乱码。<strong>两者都需源码级修复</strong>（补 rc 或重编译 TWRP）</td><td><code>adb push</code> / <code>adb pull</code> 传文件（已验证可靠，卡刷 zip 可直接放进已解密的 <code>/data/media/0</code>）；或刷回 <code>77c350f8…</code> 保持纯 adb 稳定态</td></tr>
+</table>
+<p>如果你要我继续把这两项彻底修掉，路径是：拿 Y73s 仓库的 <code>patches/</code> 集 → 在 GitHub Actions 上重编译 12.1 源码树 → 同时补上 configfs 的完整开关动作与 user 999 的 auth token 处理。那会是一轮 30–60 分钟的云端构建，由我执行，不需要你碰编译。</p>
+<p>⚠️ 数据始终完好，全程未执行 <code>format/wipe</code>；别点 Format Data。</p>
 
 <div class="foot">唯一入口：本文件。配置 <code>device/vivo/y52s/</code>，上游对照 <code>reference/</code>，
 证据 <code>device_dump/</code>，命令刷 <code>flash/</code>，云端编译 <code>.github/workflows/</code>，
