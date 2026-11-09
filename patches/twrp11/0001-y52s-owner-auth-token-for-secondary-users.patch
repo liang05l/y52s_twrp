@@ -1,6 +1,6 @@
 --- a/crypto/fscrypt/Decrypt.cpp
 +++ b/crypto/fscrypt/Decrypt.cpp
-@@ -861,6 +861,103 @@
+@@ -861,6 +861,104 @@
  	return false;
  }
  
@@ -15,13 +15,11 @@
 + *        1000_USRPKEY_synthetic_password_c977db9a6356c1ad   (user 999)
 + *   /data/misc/keystore/user_999/            -> only *_test keys, NO SP key
 + *
-+ * So the profile's synthetic-password key is stored in the OWNER's keystore
-+ * namespace (uid 1000, user 0). keystore binds such keys to the OWNER's
-+ * gatekeeper SID, but Decrypt_User_Synth_Pass() verifies gatekeeper with
-+ * fakeUid(user_id) (999), producing a token carrying the profile's SID.
-+ * keystore then rejects the operation with
-+ * KM_ERROR_KEY_USER_NOT_AUTHENTICATED (-26). Real device log:
-+ *   [DEBUG] Decrypt_User: ENTER user_id=999
++ * The profile's synthetic-password key lives in the OWNER's keystore
++ * namespace (uid 1000, user 0), so keystore binds it to the OWNER's
++ * gatekeeper SID. Decrypt_User_Synth_Pass() verifies gatekeeper with
++ * fakeUid(user_id) (999), producing a token carrying the profile's SID, and
++ * keystore answers KM_ERROR_KEY_USER_NOT_AUTHENTICATED (-26). Real log:
 + *   [SPBLOB] Found key file: .../user_0/1000_USRPKEY_synthetic_password_c977db9a6356c1ad
 + *   [SPBLOB] Got key characteristics successfully
 + *   [Keymaster] begin: km_error=-26
@@ -30,10 +28,13 @@
 + *
 + * Fix: re-verify gatekeeper with the OWNER's password handle (same LSKF,
 + * unified challenge) and put that token in /auth_token. keystore_auth then
-+ * adds the owner token, which is what the profile's SP key is bound to.
-+ * The application_id is NOT changed: it still comes from the profile's own
-+ * password token + secdiscardable.
++ * adds the owner token. application_id is NOT changed: it still comes from
++ * the profile's own password token + secdiscardable.
 + * =========================================================================== */
++/* Free_Return is defined just below this helper; the helper only needs its
++ * buffer-freeing side effect, so declare it here. */
++bool Free_Return(bool retval, void* weaver_key, password_data_struct* pwd);
++
 +static bool Write_Owner_Auth_Token(const std::string& Password) {
 +    const std::string owner_path = "/data/system_de/0/spblob/";
 +    std::string owner_handle;
@@ -104,7 +105,7 @@
  bool Free_Return(bool retval, void* weaver_key, password_data_struct* pwd) {
  	if (weaver_key)
  		free(weaver_key);
-@@ -1037,6 +1134,17 @@
+@@ -1037,6 +1135,17 @@
  			printf("gatekeeper verification failed\n");
  			return Free_Return(retval, weaver_key, &pwd);
  		}
