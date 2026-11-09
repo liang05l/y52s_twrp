@@ -654,6 +654,35 @@ footer 的 <code>original_image_size</code> 一致、<code>vbmeta_offset</code> 
 命令：<code>flash_recovery.ps1 -Image .\build\recovery.img</code>。
 ⚠️ 数据完好，别点 Format Data。</div>
 
+<h3>12.6 12:20 追加 — fastboot 通道实测：能读、不能刷</h3>
+<p>设备一度出现在 <strong>fastboot 模式</strong>（<code>fastboot devices</code> 返回
+<code>MBLF9LSONZPJG69L fastboot</code>，PnP 为 <code>USB\VID_0E8D&amp;PID_201C</code> Android ADB Interface），
+这解释了此前 <code>adb devices</code> 一直为空——不是线没插，是设备不在 adb 模式。</p>
+<div class="cmd">getvar: unlocked=yes  secure=no  is-userspace=no  slot-count=0
+       partition-size:recovery = 0x6000000 (100663296 B, 与产物一致)
+       max-download-size      = 0x8000000 (128 MB)
+fastboot flash recovery recovery.img
+  Sending 'recovery' (98304 KB)  OKAY [2.206s]
+  Writing 'recovery'             FAILED (remote: 'Verify state locked')
+fastboot boot recovery.img        FAILED (remote: 'unknown command')
+fastboot reboot                   OKAY → 重启后 USB 不再枚举</div>
+<p><strong>结论</strong>：vivo 的 LK 虽然报 <code>unlocked: yes</code>，仍用
+<code>Verify state locked</code> 拒绝 fastboot 刷写；<code>fastboot boot</code> 也不支持。
+所以<strong>刷入通道仍然只能是系统里的 Magisk root + dd</strong>（<code>flash_recovery.ps1</code>），
+fastboot 仅能用于读取变量和重启。这与之前实测「系统里能 dd 写 recovery 分区」一致，
+也说明不需要（也不应）去试 <code>fastboot flashing unlock</code>——那会清空 <code>/data</code>。</p>
+<p><strong>新增一键脚本</strong>（离线已通过语法校验）：
+<code>flash/flash_and_verify.ps1</code> 把「等 adb → 刷入 → 写 BCB + sysrq 硬重启 → 等 TWRP →
+拉取取证」串成一条命令；<code>flash/verify_twrp.sh</code> 是设备侧只读取证器，
+输出分区 sha256、触摸输入设备（<code>/proc/bus/input/devices</code> + <code>getevent -il</code>）、
+<code>/data/media/0</code> 视图、<code>boot_patchlevel</code>、HAL 服务与
+<code>recovery.log</code> 解密行到 <code>build/y52s_verify.txt</code>。全程不写 <code>/data</code>。</p>
+<div class="block"><strong>当前阻塞</strong>：<code>fastboot reboot</code> 后设备的 USB 完全不枚举
+（adb / fastboot / PnP 全空），推测回到了没有正确 USB gadget 配置的 CI 原样版 TWRP。
+<strong>需要一次物理操作把设备送回系统</strong>：长按电源 10 秒以上强制关机再正常开机
+（系统里 adb + Magisk root 一直可用），或再按音量上+电源进 fastboot 告诉我。
+adb 一上线，我一条 <code>flash_and_verify.ps1</code> 就能完成刷入与全部验证。</div>
+
 <div class="foot">唯一入口：本文件。配置 <code>device/vivo/y52s/</code>，上游对照 <code>reference/</code>，
 证据 <code>device_dump/</code>，命令刷 <code>flash/</code>，云端编译 <code>.github/workflows/</code>，
 产物取证 <code>build/inspect_ci_image.py</code>。未列出来源的参数保持 PENDING。</div>
