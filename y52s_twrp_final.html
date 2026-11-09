@@ -1167,6 +1167,26 @@ clang-12: error: linker command failed with exit code 1</pre>
 <p><strong>唯一未验证项</strong>：<code>twrp.user.999.decrypt</code>。FBE 的 CE 密钥必须由锁屏 PIN 派生，密码不经过我，所以需要<strong>你在 TWRP 屏幕上输一次锁屏 PIN</strong>。输入后 TWRP 会依次尝试用户 0 与 999，0007 会对 999 改用机主 auth token。输完告诉我，我读 <code>twrp.user.999.decrypt</code>、<code>y52s: owner auth token written</code> 与 <code>/data/user/999</code> 是否明文即可定论。</p>
 <div class="block">回退镜像始终是 <code>build/recovery.img</code>（<code>a3855ed4…</code>，已完整验证）。新镜像验收未通过之前不要删它。全程未执行 format / wipe，数据完好。</div>
 
+<h3>18.12 真机结果：user 999 仍失败 → 补丁挂错位置（已按完整日志重做）</h3>
+<p>输 PIN 后主用户 0 <code>Decrypted Successfully</code>、<code>/data/media/0</code> 恢复 96 个正常目录，但 <code>twrp.user.999.decrypt=0</code>。关键证据：<strong><code>y52s: owner auth token written</code> 一次都没出现</strong> —— 0007 的 helper 从未执行。</p>
+<p>把 <code>/tmp/recovery.log</code> 的<strong>全部</strong>尝试标记（不是 tail 截断）拉出来后，真实路径是：</p>
+<table>
+  <tr><th>尝试</th><th>传入密码</th><th>日志</th><th>结论</th></tr>
+  <tr><td>user 0</td><td>锁屏 PIN</td><td><code>[SECDIS] Auth token written to /auth_token (69 bytes)</code> → <code>[SPBLOB] Read auth_token file, size=69</code> → <code>[Keymaster] begin (authToken)</code> → <code>User 0 Decrypted Successfully!</code></td><td>机主 token 已写入 <code>/auth_token</code></td></tr>
+  <tr><td>999 #1</td><td>锁屏 PIN</td><td><code>using secdis</code> → <strong><code>gatekeeper verification failed (ret=-1)</code></strong> → 直接 return</td><td><code>verify(fakeUid(999), …)</code> 对不上机主 SID，<strong>根本没走到「验证成功」分支</strong></td></tr>
+  <tr><td>999 #2</td><td>默认 <code>"!"</code></td><td><code>[SPBLOB] Found key file: …/user_0/1000_USRPKEY_…c977db9a6356c1ad</code> → <code>[Keymaster] begin: km_error=-26</code></td><td><code>Password == "!"</code> 使 <code>if (Password != "!")</code> 整段 gatekeeper 被跳过，<code>auth_token_len=0</code>，unwrap 不带 auth token</td></tr>
+  <tr><td>999 #3</td><td>锁屏 PIN</td><td>又是 <code>ret=-1</code></td><td>同上</td></tr>
+</table>
+<p>TWRP 12.1 <code>PartitionManager::Decrypt_Device()</code> 对每个次要用户先试用户输入的 PIN，失败后再自动试 <code>"!"</code>（默认密码）。<strong>旧 0007 把 hook 放在 <code>printf("[SECDIS] Gatekeeper verification succeeded")</code> 之后，而 999 的验证从来没成功过，所以补丁是死代码。</strong>此前把 <code>-26</code> 归因于「分身用户走了不同 secdis 分支」也是误判：user 0 与 999 走的是同一个 <code>Decrypt_User_Synth_Pass</code>，差别只在密码与 <code>fakeUid</code>。</p>
+<p><strong>设备侧密钥布局取证</strong>（DE 已解密，只读）：<code>/data/system_de/999/spblob/</code> 有完整的 <code>c977db9a6356c1ad.pwd/.secdis/.spblob/.handle</code>，并额外有 <code>0000000000000000.e0</code>(60 B) / <code>.p1</code>(32 B) escrow 文件；两个 <code>.pwd</code> 结构相同但 scrypt salt 与 SID 不同（机主 <code>c8db…</code>、999 <code>1d8a…</code>）。CE 密钥目录 <code>/data/misc/vold/user_keys/ce/999/current/</code> 与 0 结构一致。SP key 始终在 <code>user_0</code> keystore 命名空间 → 绑定机主 SID。</p>
+<p><strong>重做后的 0007</strong>（<code>patches/system_vold/0007</code>，同名替换，CI 链不变）：删掉整个 <code>Write_Owner_Auth_Token</code> helper，改为在 <code>unwrapSyntheticPasswordBlob()</code> 调用<strong>之前</strong>、对 <code>user_id != 0 &amp;&amp; auth_token_len == 0</code> 的无条件钩子：</p>
+<pre>if (stat("/auth_token", &amp;st) == 0 &amp;&amp; st.st_size &gt;= 69) {
+    auth_token_len = (uint32_t)st.st_size;
+    printf("y52s: reusing owner auth token (%u bytes) for user %d\n", ...);
+}</pre>
+<p>直接复用用户 0 解密时写入的 69 字节机主 <code>HW_AUTH_TOKEN</code>，让 <code>unwrapSyntheticPasswordBlob()</code> 走 <code>if (auth_token_len &gt; 0)</code> 分支、把机主 token 传给 keymaster <code>begin()</code>。<strong><code>application_id</code> 故意不动</strong>：在 <code>"!"</code> 这次尝试里，TWRP 已经用 <code>default-password</code> + 999 自己的 secdiscardable 算出它，对无独立 LSKF 的分身用户正是正确绑定。同时同步更新了 <code>apply_ci12_patches.sh</code> 的两个标记断言、workflow 产物校验、以及两个真机验收脚本。本地「0002→0003→0004→0006→0007 + MTP + 链接补丁」全链预演通过，括号配平、hook 位置断言为真。</p>
+<div class="block">提交 <code>66c2b36</code> → <strong>run <code>42643184822</code></strong>（15:17 UTC）。产物出来后下载 → 离线校验 → 刷入 → 重启 → 你再输一次 PIN，读 <code>twrp.user.999.decrypt</code> 与 <code>y52s: reusing owner auth token</code> 定论。</div>
+
 <div class="foot">唯一入口：本文件。配置 <code>device/vivo/y52s/</code>，上游对照 <code>reference/</code>，
 证据 <code>device_dump/</code>，命令刷 <code>flash/</code>，TWRP 11 补丁 <code>patches/twrp11/</code>（存档），
 12.1 解密补丁 <code>patches/system_vold/</code>，CI 流水线 <code>build/{prepare_ci12_tree.py,apply_ci12_patches.sh,postprocess_ci12.py}</code>。未列出来源的参数保持 PENDING。</div>
