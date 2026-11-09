@@ -1133,7 +1133,24 @@ keystore 找不到匹配条目 → <code>-26 KEY_USER_NOT_AUTHENTICATED</code>�
   <li><code>build/postprocess_ci12.py</code>：以<strong>已验证的 <code>a3855ed4…</code> 自身</strong>作输入跑通 → 816 个 ramdisk 条目、14 固件、41 trustlet、configfs MTP 开关在、旧门控已删、Y52s kernel/dtb、官方 vbmeta 逐字保留、<code>os_version=0x14000172</code></li>
 </ul>
 <p>后处理会把 <code>device/vivo/y52s/recovery/root/</code> 的全部已验证 ramdisk 资产覆盖进源码产物，只保留新编译出来的二进制（含 0007），不依赖 TWRP 的 <code>recovery/root</code> 自动合并行为。<code>.github/workflows/build-twrp.yml</code>（11 线）已改为<strong>仅手动触发存档</strong>，避免空跑。</p>
-<div class="block">提交 <code>5f342c0</code> 触发 <strong>run <code>42625546417</code></strong>（<code>Build TWRP 12.1 (Y73s tree) for vivo Y52s</code>）。产物名 <code>y52s-twrp121-recovery</code>。待下载校验 → 刷入 → 真机确认 <code>twrp.user.999.decrypt</code>。设备当前仍是 <code>a3855ed4…</code>、系统态、BCB 全 0。</div>
+<div class="block">提交 <code>5f342c0</code> 触发 <strong>run <code>42625546417</code></strong>（<code>Build TWRP 12.1 (Y73s tree) for vivo Y52s</code>）。产物名 <code>y52s-twrp121-recovery</code>。设备当前仍是 <code>a3855ed4…</code>、系统态、BCB 全 0。</div>
+
+<h3>18.10 首轮 12.1 构建失败：链接期缺 Keymaster 4.0 HIDL（已一次性修复）</h3>
+<p>run <code>42625546417</code> 前 12 步全绿（设备树改造、repo sync、严格补丁链），编译推进到 <strong>99%（24042/24086）</strong>，只有最后一步链接 <code>recovery</code> 失败。日志原文：</p>
+<pre>ld.lld: error: undefined symbol:
+  android::hardware::keymaster::V4_0::IKeymasterDevice::getService(
+      std::__1::basic_string&lt;char&gt; const&amp;, bool)
+&gt;&gt;&gt; Keymaster.o in libvold.a
+clang-12: error: linker command failed with exit code 1</pre>
+<p><strong>根因</strong>：Y73s 的 <code>0006</code> 把 <code>Keymaster.cpp</code> 整体替换成直连 Keymaster 4.0 HIDL 的客户端（<code>IKeymasterDevice40::getService("trustonic")</code>）；但当前 <code>TeamWin/android_bootable_recovery@android-12.1</code> 的 <code>Android.mk</code> 已转向 KeyMint / keystore2，加密段只链接 <code>libkeymint_support</code>，<strong>不再链接 <code>android.hardware.keymaster@4.0</code></strong>。链接命令里 <code>gatekeeper@1.0.so</code>、<code>weaver@1.0.so</code> 都在，唯独缺这一个。已验证镜像 <code>a3855ed4…</code> 里确实带 <code>system/lib64/android.hardware.keymaster@4.0.so</code>（158488 B），证明作者构建时有此依赖。</p>
+<p><strong>一次补齐的三处</strong>（本地全部预演通过后才提交）：</p>
+<ol>
+  <li><code>patches/bootable_recovery_12.1/0002-y52s-keymaster-hidl-link.patch</code>：在 <code>TW_INCLUDE_CRYPTO</code> 段给 <code>LOCAL_SHARED_LIBRARIES</code> 加 <code>android.hardware.keymaster@4.0</code>（解决链接），并给 <code>TWRP_REQUIRED_MODULES</code> 加同名模块（确保 .so 装进 ramdisk）。构建日志证实 <code>//hardware/interfaces/keymaster/4.0:android.hardware.keymaster@4.0</code>、<code>@3.0</code>、<code>libhwbinder</code> 三个模块本轮均已编译，模块名有效。</li>
+  <li><code>build/apply_ci12_patches.sh</code> 增加该补丁及两个标记断言；离线跑通「0002→0003→0004→0006→0007 + MTP + 链接补丁」全链，<code>Write_Owner_Auth_Token</code>、括号配平、三个标记全绿。</li>
+  <li><code>device/vivo/y52s/prebuilt/libs/</code> 存 5 个来自已验证镜像的运行时库（<code>keymaster@4.0/3.0</code>、<code>libhidltransport</code>、<code>libhwbinder</code>、<code>libhidlbase</code>）；<code>postprocess_ci12.py</code> 采取<strong>编译产物优先、缺失才补</strong>策略并强制断言 <code>keymaster@4.0.so</code> 存在，避免用旧 .so 覆盖新编译版本、也避免运行时缺库。产物验证步骤同步加检查。</li>
+</ol>
+<p>顺带复核了 0007 的正确性：profile 的 auth token 在 gatekeeper 回调（1193 行）写入 <code>/auth_token</code>，0007 在 1212 行之后覆盖，<code>unwrapSyntheticPasswordBlob</code> 到 1228 行才读，<strong>覆盖不会被冲掉</strong>；传入的 <code>auth_token_len</code> 仅作 <code>&gt;0</code> 判断，实际解析用文件真实长度，机主 token 同为 69 字节 <code>hw_auth_token_t</code>，无需改动补丁。</p>
+<div class="block">提交 <code>4ad9c37</code> → <strong>run <code>42634563187</code></strong> 已触发。ccache 热缓存（上一轮已保存），仍需一次完整 <code>repo sync</code>。这是 12.1 线的最后一次构建：成功后下载 → 离线校验 → 刷入 → 真机验 <code>twrp.user.999.decrypt</code>。</div>
 
 <div class="foot">唯一入口：本文件。配置 <code>device/vivo/y52s/</code>，上游对照 <code>reference/</code>，
 证据 <code>device_dump/</code>，命令刷 <code>flash/</code>，TWRP 11 补丁 <code>patches/twrp11/</code>（存档），
