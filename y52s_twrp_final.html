@@ -1233,7 +1233,12 @@ failed to unwrapSyntheticPasswordBlob</pre>
   <li>999 的 verify 若仍失败<strong>不再提前 return</strong>，继续 unwrap 并留下完整日志（<code>y52s: profile verify failed, continuing</code>）。</li>
   <li>保留 unwrap 前的机主 token fallback（<code>auth_token_len == 0</code> 时），作为最后兜底与诊断标记。</li>
 </ol>
-<p>本地「0002→0003→0004→0006→0007 + MTP + 链接补丁」全链预演 PASS，四个标记齐全、括号配平、旧 <code>memcpy</code> 已消失。提交 <code>398665f</code> → <strong>run <code>42654011759</code></strong>（16:21 UTC）。</p>
+<p>本地「0002→0003→0004→0006→0007 + MTP + 链接补丁」全链预演 PASS，四个标记齐全、括号配平、旧 <code>memcpy</code> 已消失。提交 <code>398665f</code> → <strong>run <code>42654011759</code></strong>（16:21 UTC）。另核实 AOSP <code>private int fakeUid(int uid) { return 100000 + uid; }</code> 与 TWRP 的 <code>fakeUid</code> <strong>完全一致</strong>，排除 uid 映射假设。</p>
+
+<h3>18.16 本轮构建成功并刷入：待最后一次输 PIN 定论</h3>
+<p>run <code>42654011759</code> 于 16:48 UTC <strong>completed success</strong>。产物 <code>build/ci12v4/recovery.img</code> = <strong><code>6a8ef71b…</code></strong>。离线校验全绿：三个新标记 <code>y52s: scrypt password token</code> / <code>profile verify failed, continuing</code> / <code>y52s: reusing owner auth token</code> 均编译进 <code>system/bin/recovery</code> 与 <code>libtar.so</code>；官方 vivo vbmeta（1728 B @ <code>0x37b1800</code>、公钥 <code>4bdf3ccd…</code>、<code>2019-06-06</code>）、<code>os_version=0x14000172</code>、3696 ramdisk 条目、14 固件 / 41 trustlet、keymaster@4.0 库、MTP 开关与上一版一致。</p>
+<p>刷入沿用 TWRP 内直接 <code>push + dd</code>（2.1 s + 0.7 s），<strong>分区回读 <code>6a8ef71b…</code> 一致</strong>，清 BCB 后 <code>reboot recovery</code>。重启后：运行中二进制能 grep 到两个新标记（各 1 次）、<code>installKeyLegacy: SUCCESS</code>（DE 密钥链完好）、<code>Loading page decrypt_pin</code> / <code>Is encrypted, do decrypt page first</code> 已出现、BCB 全 0、<code>sys.usb.config=adb</code>。</p>
+<div class="block"><strong>唯一剩下一步</strong>：在 TWRP 屏幕上输锁屏 PIN。这次日志会给出<strong>决定性结论</strong>：若出现 <code>[SECDIS] Gatekeeper verification succeeded</code> 且后面跟 <code>User 999 Decrypted Successfully</code>，说明 999 的两处实现缺陷已修好；若出现 <code>y52s: profile verify failed, continuing</code> + <code>gatekeeper verification failed (ret=…)</code>，则可<strong>确定性收尾</strong>：999 的 LSKF 既不是机主 PIN、也不是 AOSP <code>default-password</code>，只能是 vivo 创建分身时设置的独立密码——届时在 TWRP 终端执行 <code>twrp decrypt &lt;分身密码&gt; 999</code> 即可，无需再重编译。回退 <code>a3855ed4…</code> 保留；全程未 format / wipe。</div>
 
 <div class="foot">唯一入口：本文件。配置 <code>device/vivo/y52s/</code>，上游对照 <code>reference/</code>，
 证据 <code>device_dump/</code>，命令刷 <code>flash/</code>，TWRP 11 补丁 <code>patches/twrp11/</code>（存档），

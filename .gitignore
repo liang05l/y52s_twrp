@@ -83,3 +83,6 @@ build/ci12fix/*.img
 !flash/probe_u999_keymaster_tail.sh
 !flash/probe_u999_credential.sh
 !flash/try_default_999.sh
+!build/ci12v4/
+build/ci12v4/*.img
+!build/ci12v4/recovery.img.sha256
