@@ -864,19 +864,50 @@ FBE 解密的根因已用二进制证据锁定为「recovery 分区缺 vivo 原�
   <tr><td>卡刷</td><td><code>unzip</code>、<code>zipinfo</code>、<code>libziparchive.so</code>、<code>/system/etc/security/otacerts.zip</code>、<code>/res/images</code> 齐备，日志有 <code>Set page: 'install'</code>；内置存储已解密，可直接选 zip</td></tr>
   <tr><td>亮度 / adb</td><td><code>/sys/class/leds/lcd-backlight/brightness</code> 可读写；<code>sys.usb.config=adb</code>、<code>configfs=1</code>，adb 稳定</td></tr>
 </table>
-<p>仅有两处非阻塞边界：<code>user 999</code>（系统辅助用户）解 synthetic password 报 <code>km_error=-26</code>，主用户 0 不受影响；
-当前 USB 模式是 <code>adb</code> 而非 <code>mtp,adb</code>（这是之前为防止 MTP 抢掉 adb 而设的默认值），如需电脑直接可见存储，
-在 TWRP 的 Mount 菜单里手动开启 MTP 即可，或用 <code>adb push</code> 传 zip。</p>
+<p><strong>当时记为「非阻塞边界」的两项，经用户追问后已在第十五章重新核实并修正</strong>：
+① <code>user 999</code> 是真实的 vivo 应用分身用户、有独立 CE 密钥和数据，<strong>未解密确实不能算 100% 完整</strong>；
+② adb 与 MTP 可以同时开，已改默认并实现（见 15.2）。</p>
 
 <h3>14.4 最终产物与回退</h3>
 <ul>
-  <li>当前 recovery 分区 = <code>build/recovery.img</code> / <code>build/recovery_final.img</code>（<code>77c350f8…</code>）—— <strong>推荐使用</strong>。</li>
+  <li>当前 recovery 分区 = <code>build/recovery.img</code>（<code>43cfb4e4…</code>，含 adb+MTP 默认，见第十五章）。</li>
+  <li>纯解密成功、未改 USB 的上一版：<code>build/recovery_decrypt_ok.img</code>（<code>77c350f8…</code>），也存于 <code>build/recovery_final.img</code>。</li>
   <li>触摸可用但未解密的上一版：<code>build/recovery_touch_ok.img</code>（<code>0fda91ff…</code>）。</li>
   <li>稳定旧版 v7：<code>build/recovery_v7.img</code>（<code>0c60a727…</code>）。一键回退：<code>flash_recovery.ps1 -Image &lt;镜像路径&gt;</code>。</li>
   <li>一键恢复脚本 <code>flash/recover.ps1</code> 仍保留（清 BCB + 刷回触摸版），现在无需使用。</li>
   <li>设备取证脚本：<code>flash/verify_final.sh</code>、<code>verify_features.sh</code>、<code>verify_decrypt.sh</code> 及 <code>probe_*.sh</code> 系列。</li>
 </ul>
 <p>⚠️ 数据始终完好，全程未执行 <code>format/wipe</code>；如后续在 TWRP 里看到「格式化 Data」提示，<strong>不要点</strong>。</p>
+
+<h2>十五、17:10 追加 — 用户追问的两项：user 999 与 adb/MTP 共存</h2>
+
+<h3>15.1 user 999 未解密：确实不能算 100% 完整（更正第十四章措辞）</h3>
+<table>
+  <tr><th>取证</th><th>结果</th></tr>
+  <tr><td><code>pm list users</code></td><td><code>UserInfo{0:机主:13} running</code>、<code>UserInfo{999:DOBULE_APP:20000030} running</code> —— <strong>vivo 应用分身（双开）用户，不是占位符</strong></td></tr>
+  <tr><td><code>/data/system/users/userlist.xml</code></td><td><code>&lt;user id="0" /&gt; &lt;user id="999" /&gt;</code>，另有 <code>999.xml</code></td></tr>
+  <tr><td>FBE 密钥</td><td><code>/data/misc/vold/user_keys/ce/999</code>、<code>de/999</code> 都存在 —— 有独立 CE 密钥</td></tr>
+  <tr><td>实际数据</td><td><code>/data/system_ce/999/</code> 含 <code>accounts_ce.db</code>、<code>recent_tasks</code>、<code>snapshots</code>、<code>shortcut_service</code> 等</td></tr>
+  <tr><td>失败点</td><td>SPBLOB 用 Direct Keymaster HIDL 找到 999 的 <code>1000_USRPKEY_synthetic_password_c977db9a…</code>，<code>getKeyCharacteristics</code> 成功，但 <code>begin → km_error=-26 (KEY_USER_NOT_AUTHENTICATED)</code>。TWRP 拿主用户 0 的 auth token（userId=0）去解 999 的密钥，密钥绑定的是 999</td></tr>
+</table>
+<p><strong>影响范围</strong>：主用户 0 的数据、卡刷、adb、MTP、触摸、亮度全部正常；仅 <code>/data</code> 备份会缺少应用分身那部分（二进制里有 <code>backup_storage_undecrypt_warning</code> 提示）。所以严格说是「主用户完全解密、分身用户未解密」，不是全绿。</p>
+<p><strong>源码依据</strong>：TWRP 12.1 <code>openrecoveryscript.cpp</code> 的 CLI 分支把第二个参数当作 USER ID：<code>PartitionManager.Decrypt_Device(pass, atoi(userid.c_str()))</code>，<code>twrp --help</code> 也写 <code>decrypt &lt;password&gt; [USER ID]</code>。
+已实测 <code>twrp decrypt default_password 999</code> → <code>Attempting to decrypt FBE for user 999... Failed to decrypt user 999</code>（指定用户生效，但默认密码不对，且此时主用户 0 也处于未解密状态）。</p>
+<p><strong>三条可行路径</strong>：① 你本人在 TWRP 终端执行 <code>twrp decrypt &lt;你的锁屏PIN&gt; 999</code>（密码不经过我，不外泄），若 999 与主用户共用密码就可能直接解开；
+② 源码级修复 —— 让 <code>unwrapSyntheticPasswordBlob</code> 按 userId 构造对应 auth token，需 Y73s 的完整 12.1 补丁集 + 一轮云端编译；
+③ 不用 TWRP：系统里 Magisk root 直接打包 <code>/data/user/999/</code> 和 <code>/data/system_ce/999/</code>，绕开 TWRP 解密。</p>
+<div class="block"><strong>注意</strong>：FBE 每次重启进 TWRP 都要重新输锁屏密码。本轮为验证 USB 改动刷入并重启了一次，当前 <code>twrp.user.0.decrypt=0</code>、<code>twrp.user.999.decrypt=0</code>，
+需要你再输一次密码恢复解密状态（这也顺便可以试上面的 ①）。</div>
+
+<h3>15.2 adb 与 MTP 能同时开，已做成默认</h3>
+<table>
+  <tr><th>项</th><th>实测 / 改动</th></tr>
+  <tr><td>可行性依据</td><td>系统态 Windows PnP 就是 <code>VID_2D95&amp;PID_6013</code> 的 MI_00（大容量存储/MTP）+ MI_01（ADB Interface）同时在线；Y73s 的 <code>init.recovery.mt6853.rc</code> 里 <code>on property:sys.usb.config=mtp,adb</code> 动作完整挂了 <code>f1→ffs.mtp</code> 与 <code>f2→ffs.adb</code>、<code>idProduct=0x4ee2</code></td></tr>
+  <tr><td>之前只有 adb 的原因</td><td><code>init.rc</code> 在 on init 设 <code>sys.usb.config=adb</code>；<code>persist.sys.usb.config</code> 是持久化属性，系统写入 <code>/data/property</code>，改 <code>prop.default</code> 覆盖不了；<code>ffs.mtp.ready</code> 要等 MTP FunctionFS 服务起来才为 1</td></tr>
+  <tr><td>实现</td><td><code>build/port_y73s.py</code>：把 <code>prop.default</code> 里 5 行 <code>persist.sys.usb.config</code> 全改为 <code>mtp,adb</code>；在 <code>init.recovery.mt6853.rc</code> 追加 <code>on property:sys.usb.ffs.mtp.ready=1 → setprop sys.usb.config mtp,adb</code>（等 FunctionFS 就绪，所有条件齐备时才切复合，避免过早设置被覆盖）。再经 <code>make_official_hybrid.py</code> 接回官方 vbmeta。产物 <code>43cfb4e4…</code></td></tr>
+  <tr><td>真机验证</td><td><code>sys.usb.config=mtp,adb</code>、<code>sys.usb.ffs.mtp.ready=1</code>；gadget <code>f1 → ffs.mtp</code>、<code>f2 → ffs.adb</code>、<code>idProduct=0x4ee2</code>、<code>UDC=musb-hdrc</code>；Windows PnP 同时出现 <code>WPD PD2057</code>（MTP，<code>VID_18D1&amp;PID_4EE2&amp;MI_00</code>）与 ADB Interface（MI_01）；<code>adb devices</code> 仍是 <code>recovery</code> 在线 —— <strong>两者共存，adb 没被抢掉</strong></td></tr>
+  <tr><td>回退</td><td>只想保留纯 adb 时刷回 <code>build/recovery_decrypt_ok.img</code>（<code>77c350f8…</code>）</td></tr>
+</table>
 
 <div class="foot">唯一入口：本文件。配置 <code>device/vivo/y52s/</code>，上游对照 <code>reference/</code>，
 证据 <code>device_dump/</code>，命令刷 <code>flash/</code>，云端编译 <code>.github/workflows/</code>，

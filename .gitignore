@@ -43,3 +43,4 @@ reference/y52s_official_recovery.img
 !build/make_official_hybrid.py
 !flash/verify_final.sh
 !flash/verify_features.sh
+!flash/probe_user999_usb.sh

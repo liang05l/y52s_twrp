@@ -176,6 +176,21 @@ for l in lines:
 PROP["data"] = "".join(out_lines).encode()
 print("prop substitutions:", n)
 
+# --- 1b) USB composite: adb + MTP simultaneously ----------------------------
+# init.rc defaults sys.usb.config to "adb", and the old prop.default carries
+# four "persist.sys.usb.config=none" lines that override the first value.
+# The Y73s mt6853.rc already contains the complete configfs action for
+# "mtp,adb" (ffs.mtp -> f1 AND ffs.adb -> f2, idProduct 0x4ee2), so both
+# interfaces can be enabled at once; the system-mode PnP on this device shows
+# VID_2D95&PID_6013 MI_00 (mass storage/MTP) + MI_01 (ADB) together.
+usb = PROP["data"].decode("utf-8", "replace")
+usb = usb.replace("persist.sys.usb.config=adb",
+                  "persist.sys.usb.config=mtp,adb")
+usb = usb.replace("persist.sys.usb.config=none",
+                  "persist.sys.usb.config=mtp,adb")
+PROP["data"] = usb.encode()
+print("prop.default: persist.sys.usb.config -> mtp,adb (all occurrences)")
+
 # --- 2) fstab: Y52s measured partition set ----------------------------------
 F = by["system/etc/recovery.fstab"]
 F["data"] = open(FSTAB, "rb").read()
@@ -206,6 +221,24 @@ old_import = "import /init.recovery.${ro.hardware}.rc"
 assert old_import in it, "Y73s init.rc import line not found"
 irc["data"] = it.replace(old_import, "import /init.recovery.mt6853.rc", 1).encode()
 print("init.rc: ${ro.hardware} import replaced with explicit mt6853.rc")
+
+# --- 4b2) select the adb+MTP composite once FunctionFS is ready -------------
+# Triggering on sys.usb.ffs.mtp.ready guarantees the configfs action above
+# sees all of its conditions satisfied (config=mtp,adb, configfs=1,
+# ffs.mtp.ready=1, ffs.ready=1) and links BOTH f1 (mtp) and f2 (adb).
+mrc = by["init.recovery.mt6853.rc"]
+mt = mrc["data"].decode("utf-8", "replace")
+assert "on property:sys.usb.config=mtp,adb" in mt, \
+    "configfs mtp,adb action missing - would not be safe to enable"
+if "y52s: adb + MTP composite" not in mt:
+    nl = "\r\n" if "\r\n" in mt else "\n"
+    block = (
+        "# y52s: adb + MTP composite\n"
+        "on property:sys.usb.ffs.mtp.ready=1\n"
+        "    setprop sys.usb.config mtp,adb\n"
+    ).replace("\n", nl)
+    mrc["data"] = (mt.rstrip("\r\n") + nl + block).encode()
+    print("mt6853.rc: added mtp,adb selection on ffs.mtp.ready=1")
 
 # --- 4c) Y73s rc files still hard-code PD2031 for the touch-firmware picker.
 # Measured on this device: ro.vivo.product.model / ro.vendor.vivo.product.model
