@@ -70,4 +70,5 @@ flash/probe_u999_system.sh
 !flash/verify_u999_final.sh
 !flash/probe_postboot.sh
 !build/ci12/
+build/ci12/*.img
 !build/ci12/recovery.img.sha256
