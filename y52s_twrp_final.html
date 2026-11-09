@@ -1116,9 +1116,28 @@ keystore 找不到匹配条目 → <code>-26 KEY_USER_NOT_AUTHENTICATED</code>�
 逻辑与 18.6 相同：为 <code>user_id != 0</code> 重新用 user 0 的 <code>.pwd</code> + <code>fakeUid(0)</code> 验证 gatekeeper，把机主 auth token 写回 <code>/auth_token</code>，供 Direct Keymaster HIDL 的 <code>begin()</code> 使用；<code>application_id</code> 不变。</p>
 <p>剩下的只有<strong>一轮 12.1 源码构建</strong>（manifest <code>twrp-12.1</code> + Y73s 设备树 + <code>patches/system_vold/</code> 六个补丁 + 0007 + 官方 vbmeta 混合），材料已全部落在 <code>reference/</code> 与 <code>patches/</code>，不需要再分批探测。⚠️ 数据完好，别点 Format Data。</p>
 
+<h3>18.9 「继续」：单轮 12.1 构建（不再是分批试错）</h3>
+<p>按 18.8 的收敛结论，直接重建 <code>a3855ed4…</code> 所属的那棵 <strong>Y73s / twrp-12.1</strong> 源码树，并把 user 999 补丁落在它上面。全部材料先在本机离线预演通过，然后一次提交、一次构建。</p>
+<table>
+  <tr><th>取证项</th><th>结论</th></tr>
+  <tr><td>manifest</td><td><code>minimal-manifest-twrp/...@twrp-12.1</code> 存在；<code>twrp-default.xml</code> 把 <code>system/vold</code> 指向 <code>TeamWin/android_system_vold@android-12.1</code>、<code>bootable/recovery</code> 指向 <code>TeamWin/android_bootable_recovery@android-12.1</code> —— 与本地预演所用基线<strong>完全一致</strong></td></tr>
+  <tr><td>lunch / 路径</td><td><code>omni_k6853v1_64_6360-eng</code>，设备树必须叫 <code>device/vivo/k6853v1_64_6360</code>（<code>omni_*.mk</code> 里 inherit-product 硬编码该路径）</td></tr>
+  <tr><td><strong>Y73s 补丁顺序有缺陷</strong></td><td>它的 <code>apply-patches.sh</code> 用 <code>patch -p1 -N</code> 且冲突只警告不退出。离线预演：按 0001→0006 顺序，0001 先改写 <code>Keymaster.cpp/.h</code>，导致 0006 的整文件替换 hunk 不匹配 → <strong>0006 被整个跳过</strong>，结果 <code>Decrypt.cpp</code> 里 Direct Keymaster HIDL / SPBLOB 标记全部为 0，0007 也接不上。0006 实际已包含 0001 与 0005 的改动（二者 <code>index d9f034b..</code> 相同，是同一基线的独立补丁）。<br><strong>正确顺序：0002 → 0003 → 0004 → 0006 → 0007</strong>，0001/0005 不单独应用</td></tr>
+  <tr><td>bootable_recovery 补丁</td><td>5 个里有 3 个在 12.1 基线冲突（Magisk / zip64 / 动态分区报错抑制），且与 FBE 解密无关 → <strong>不应用</strong>，避免把编译引入不确定性</td></tr>
+  <tr><td>新增补丁</td><td><code>patches/system_vold/0007</code>（user 999 机主 auth token，已针对 CI 实际最终态重新生成）+ <code>patches/bootable_recovery_12.1/0001</code>（12.1 的 <code>data.cpp</code> 里 <code>tw_mtp_enabled</code> 默认 1 → 0，保留 MTP 功能但不在解密前枚举密文文件名）</td></tr>
+</table>
+<p><strong>三段本地预演（全部通过后才提交）</strong>：</p>
+<ul>
+  <li><code>build/prepare_ci12_tree.py</code>：clone 的 Y73s 设备树换成 Y52s 实测 kernel/dtb/dtbo、14 个 PD2057 触摸固件、vts_app_recovery、fstab、cmdline <code>PD2057_A_1.16.4</code>、patch level <code>2023-02-01</code>、产品型号，<code>device.mk</code> 的 firmware COPY_FILES 同步重写 → <code>PREPARE_OK</code></li>
+  <li><code>build/apply_ci12_patches.sh</code>：严格 fail-fast，每个补丁先 <code>--dry-run -N</code>，之后断言 <code>Direct Keymaster HIDL</code> / <code>SECDIS] Auth token written</code> / <code>Write_Owner_Auth_Token</code> / <code>tw_mtp_enabled=0</code> 四个标记 → <code>PATCHES_OK</code>，括号配平</li>
+  <li><code>build/postprocess_ci12.py</code>：以<strong>已验证的 <code>a3855ed4…</code> 自身</strong>作输入跑通 → 816 个 ramdisk 条目、14 固件、41 trustlet、configfs MTP 开关在、旧门控已删、Y52s kernel/dtb、官方 vbmeta 逐字保留、<code>os_version=0x14000172</code></li>
+</ul>
+<p>后处理会把 <code>device/vivo/y52s/recovery/root/</code> 的全部已验证 ramdisk 资产覆盖进源码产物，只保留新编译出来的二进制（含 0007），不依赖 TWRP 的 <code>recovery/root</code> 自动合并行为。<code>.github/workflows/build-twrp.yml</code>（11 线）已改为<strong>仅手动触发存档</strong>，避免空跑。</p>
+<div class="block">提交 <code>5f342c0</code> 触发 <strong>run <code>42625546417</code></strong>（<code>Build TWRP 12.1 (Y73s tree) for vivo Y52s</code>）。产物名 <code>y52s-twrp121-recovery</code>。待下载校验 → 刷入 → 真机确认 <code>twrp.user.999.decrypt</code>。设备当前仍是 <code>a3855ed4…</code>、系统态、BCB 全 0。</div>
+
 <div class="foot">唯一入口：本文件。配置 <code>device/vivo/y52s/</code>，上游对照 <code>reference/</code>，
-证据 <code>device_dump/</code>，命令刷 <code>flash/</code>，TWRP 11 补丁 <code>patches/twrp11/</code>，
-12.1 解密补丁 <code>patches/system_vold/</code>，CI 后处理 <code>build/ci_hybrid.py</code>。未列出来源的参数保持 PENDING。</div>
+证据 <code>device_dump/</code>，命令刷 <code>flash/</code>，TWRP 11 补丁 <code>patches/twrp11/</code>（存档），
+12.1 解密补丁 <code>patches/system_vold/</code>，CI 流水线 <code>build/{prepare_ci12_tree.py,apply_ci12_patches.sh,postprocess_ci12.py}</code>。未列出来源的参数保持 PENDING。</div>
 </div>
 </body>
 </html>
