@@ -9,7 +9,7 @@ for p in twrp.user.0.decrypt twrp.user.999.decrypt tw_is_encrypted tw_is_decrypt
   echo "$p=$(getprop $p)"
 done
 echo "=== USER999 LOG MARKERS (sanitized) ==="
-grep -aE 'y52s: owner auth token written|y52s: owner gatekeeper|owner token unavailable|no owner spblob|User 999 Decrypted|Decrypt_User: ENTER|km_error=|Successfully generated disk decryption|Failed to decrypt user|\[SPBLOB\] Parsed auth token' /tmp/recovery.log 2>/dev/null | tail -35
+grep -aE 'y52s: reusing owner auth token|y52s: no owner auth token|User 999 Decrypted|Decrypt_User: ENTER|km_error=|Successfully generated disk decryption|Failed to decrypt user|\[SPBLOB\] Parsed auth token|gatekeeper verification failed' /tmp/recovery.log 2>/dev/null | tail -35
 echo "=== /data/user/999 ==="
 ls -1 /data/user/999 2>&1 | head -12
 echo "=== /data/media/0 ==="

@@ -56,9 +56,11 @@ echo "  0006 markers OK"
 echo "  --- 0007 (user 999 owner auth token) ---"
 git apply --check "$P7" || fail "0007 does not apply"
 git apply "$P7"         || fail "0007 apply failed"
-grep -q 'Write_Owner_Auth_Token' Decrypt.cpp \
-  || fail "0007 marker missing"
-echo "  user999 patch OK"
+grep -q 'y52s: reusing owner auth token' Decrypt.cpp \
+  || fail "0007 marker missing (owner token reuse before unwrap)"
+grep -q 'if (user_id != 0 \&\& auth_token_len == 0)' Decrypt.cpp \
+  || fail "0007 hook not placed before unwrap"
+echo "  user999 patch OK (owner auth token reused before unwrap)"
 
 echo "=== bootable/recovery (MTP default off) ==="
 cd "$WORK/bootable/recovery"
