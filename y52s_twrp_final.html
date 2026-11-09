@@ -870,7 +870,7 @@ FBE 解密的根因已用二进制证据锁定为「recovery 分区缺 vivo 原�
 
 <h3>14.4 最终产物与回退</h3>
 <ul>
-  <li>当前 recovery 分区 = <code>build/recovery.img</code>（<code>43cfb4e4…</code>，含 adb+MTP 默认，见第十五章）。</li>
+  <li>当前 recovery 分区 = <code>build/recovery.img</code>（<code>a3855ed4…</code>，默认纯 adb、MTP 按需开启，见第十六章）。</li>
   <li>纯解密成功、未改 USB 的上一版：<code>build/recovery_decrypt_ok.img</code>（<code>77c350f8…</code>），也存于 <code>build/recovery_final.img</code>。</li>
   <li>触摸可用但未解密的上一版：<code>build/recovery_touch_ok.img</code>（<code>0fda91ff…</code>）。</li>
   <li>稳定旧版 v7：<code>build/recovery_v7.img</code>（<code>0c60a727…</code>）。一键回退：<code>flash_recovery.ps1 -Image &lt;镜像路径&gt;</code>。</li>
@@ -899,7 +899,10 @@ FBE 解密的根因已用二进制证据锁定为「recovery 分区缺 vivo 原�
 <div class="block"><strong>注意</strong>：FBE 每次重启进 TWRP 都要重新输锁屏密码。本轮为验证 USB 改动刷入并重启了一次，当前 <code>twrp.user.0.decrypt=0</code>、<code>twrp.user.999.decrypt=0</code>，
 需要你再输一次密码恢复解密状态（这也顺便可以试上面的 ①）。</div>
 
-<h3>15.2 adb 与 MTP 能同时开，已做成默认</h3>
+<h3>15.2 adb 与 MTP 能同时开（该「默认开启」方案已在第十六章回滚）</h3>
+<div class="block"><strong>后续修正</strong>：把 <code>mtp,adb</code> 做成开机默认，导致 MTP 服务在输密码之前就枚举 <code>/data/media</code>，
+电脑上看到的是加密文件名；且 MTP 服务线程一直运行，GUI 里关不掉。第十六章改为「默认纯 adb → 解密后手动开 MTP → 自动复合」。
+本节保留作为技术取证（证明两者确实能共存），<strong>不再推荐默认开启</strong>。</div>
 <table>
   <tr><th>项</th><th>实测 / 改动</th></tr>
   <tr><td>可行性依据</td><td>系统态 Windows PnP 就是 <code>VID_2D95&amp;PID_6013</code> 的 MI_00（大容量存储/MTP）+ MI_01（ADB Interface）同时在线；Y73s 的 <code>init.recovery.mt6853.rc</code> 里 <code>on property:sys.usb.config=mtp,adb</code> 动作完整挂了 <code>f1→ffs.mtp</code> 与 <code>f2→ffs.adb</code>、<code>idProduct=0x4ee2</code></td></tr>
@@ -908,6 +911,53 @@ FBE 解密的根因已用二进制证据锁定为「recovery 分区缺 vivo 原�
   <tr><td>真机验证</td><td><code>sys.usb.config=mtp,adb</code>、<code>sys.usb.ffs.mtp.ready=1</code>；gadget <code>f1 → ffs.mtp</code>、<code>f2 → ffs.adb</code>、<code>idProduct=0x4ee2</code>、<code>UDC=musb-hdrc</code>；Windows PnP 同时出现 <code>WPD PD2057</code>（MTP，<code>VID_18D1&amp;PID_4EE2&amp;MI_00</code>）与 ADB Interface（MI_01）；<code>adb devices</code> 仍是 <code>recovery</code> 在线 —— <strong>两者共存，adb 没被抢掉</strong></td></tr>
   <tr><td>回退</td><td>只想保留纯 adb 时刷回 <code>build/recovery_decrypt_ok.img</code>（<code>77c350f8…</code>）</td></tr>
 </table>
+
+<h2>十六、17:30 追加 — user 999 用真 PIN 仍失败；MTP「关不掉 + 乱码」的根因与修复</h2>
+
+<h3>16.1 user 999：确认是二进制实现缺陷，不是密码问题</h3>
+<p>你用真实锁屏 PIN 执行 <code>twrp decrypt &lt;PIN&gt; 999</code> 仍失败。脱敏后的日志显示它走的分支和主用户不一样：</p>
+<table>
+  <tr><th>用户</th><th>分支</th><th>结果</th></tr>
+  <tr><td>0（机主）</td><td><code>[SPBLOB] spblob v2/v3 - using direct Keymaster HIDL</code> → <code>Successfully generated disk decryption secret key</code></td><td><code>User 0 Decrypted Successfully!</code></td></tr>
+  <tr><td>999（DOBULE_APP）</td><td><code>using secdis to decrypt spblob</code></td><td>失败，<code>twrp.user.999.decrypt</code> 保持 0</td></tr>
+</table>
+<p>也就是说：指定 USER ID 生效了（<code>Decrypt_User: ENTER user_id=999</code>），但 Y73s 定制的 <code>Decrypt_User_Synth_Pass</code> 对非 0 用户走了 <code>secdis</code> 路径，而这条路径在本机解不开。
+<strong>换密码、重试、改 props 都不会有用</strong>；要修必须改 <code>system/vold/Decrypt.cpp</code> 里 synthetic password 的用户处理，再重编译 12.1 源码树（需 Y73s 的完整 <code>patches/</code> 集 + 一轮云端编译）。</p>
+<p>在修好之前，应用分身数据仍可在系统里用 root 直接取（无需 TWRP 解密），例如把 <code>/data/user/999/</code>、<code>/data/system_ce/999/</code> 打包到电脑；
+TWRP 备份 <code>/data</code> 会缺这部分（界面有 <code>backup_storage_undecrypt_warning</code> 提示），主数据、卡刷、adb、MTP 均不受影响。</p>
+
+<h3>16.2 MTP 为什么关不掉、为什么乱码</h3>
+<table>
+  <tr><th>现象</th><th>实测根因</th></tr>
+  <tr><td>关不掉</td><td>手动把 <code>sys.usb.config</code> 设回 <code>adb</code> 后属性确实是 <code>adb</code>，但 <code>sys.usb.ffs.mtp.ready</code> 仍是 <code>1</code>、configfs 的 <code>f1</code> 仍指向 <code>ffs.mtp</code> —— MTP 服务线程没停，PC 侧 <code>WPD PD2057</code> 一直在。第十五章把 <code>mtp,adb</code> 做成开机默认，等于强制 MTP 一直挂着</td></tr>
+  <tr><td>已解密却乱码</td><td>MTP 服务<strong>在输密码之前</strong>就启动并枚举了 <code>/data/media</code>，缓存的是 DE 视图（加密文件名）。之后即使 CE 密钥装入、shell 里 <code>ls /data/media/0</code> 已是 96 个正常目录，MTP 给 PC 的仍是旧列表。与「有没有解密」无关，只与<strong>启动顺序</strong>有关</td></tr>
+</table>
+
+<h3>16.3 修复：默认不启动 MTP，解密后手动开才切复合</h3>
+<ul>
+  <li><code>flash/set_mtp_default_off.sh</code>：在 <code>/cache/recovery/.twrps</code> 写 <code>tw_mtp_enabled=0</code>（实测 <code>twrp get tw_mtp_enabled = 0</code>）。/cache 持久，重启后仍生效。</li>
+  <li><code>port_y73s.py</code>：撤销第十五章对 <code>prop.default</code> 5 行 <code>persist.sys.usb.config</code> 的改写（该属性是系统持久属性，<code>prop.default</code> 本来就覆盖不了，实测 <code>getprop</code> 仍是 <code>adb</code>）；把无条件的 <code>ready=1 → mtp,adb</code> 改成<strong>双条件门控</strong>：
+      <pre>on property:sys.usb.ffs.mtp.ready=1 &amp;&amp; property:twrp.user.0.decrypt=1
+    setprop sys.usb.config mtp,adb
+
+on property:sys.usb.ffs.mtp.ready=0
+    setprop sys.usb.config adb</pre></li>
+  <li>产物 <code>build/recovery.img</code> = <strong><code>a3855ed4…</code></strong>（官方 vbmeta、触摸、解密链全部保留，只改 USB 策略）。</li>
+</ul>
+
+<h3>16.4 真机验证</h3>
+<table>
+  <tr><th>项</th><th>结果</th></tr>
+  <tr><td>开机默认</td><td><code>sys.usb.config=adb</code>、<code>sys.usb.state=adb</code>、<code>ffs.mtp.ready</code> 空、gadget <code>f1 → ffs.adb</code>、<code>idProduct=0xd001</code>；Windows PnP 只有 <code>Android ADB Recovery Interface D001</code>，<strong>没有 WPD/MTP 设备</strong></td></tr>
+  <tr><td>adb</td><td>全程在线（recovery），未被抢掉</td></tr>
+  <tr><td>门控（设备侧脚本 <code>flash/test_mtp_gate.sh</code>）</td><td><code>decrypt=0 + ready=1</code> → 保持 <code>adb</code>（不会在解密前暴露 MTP）；<code>decrypt=1 + ready=1</code> → <code>mtp,adb</code>；<code>ready=0</code> → 回 <code>adb</code>；脚本自动恢复原状态</td></tr>
+  <tr><td>BCB</td><td>硬重启后 <code>clear_bcb.sh</code> 已清为全 0，正常开机进系统</td></tr>
+</table>
+<div class="block"><strong>正确操作顺序（请照此验证）</strong>：进 TWRP → 输锁屏密码解密主用户 → 到 <strong>Mount</strong> 菜单点 <strong>Enable MTP</strong>。
+此时 rc 才切到 <code>adb+MTP</code> 复合，MTP 服务基于<strong>已解密</strong>的视图枚举，电脑上应看到正常中文/英文目录名，adb 也仍在线。
+用完在 Mount 里 Disable MTP 即回到纯 adb；或重启 recovery 也回到纯 adb。
+⚠️ 本次为验证又重启了一次，FBE 需重新输密码（当前 <code>twrp.user.0.decrypt=0</code>）。</div>
+<p>只想回到第十五章那种「开机就同时开」的状态，可刷 <code>build/recovery_decrypt_ok.img</code>（<code>77c350f8…</code>，纯 adb 无 MTP）或重新生成带无条件 action 的镜像；但那会重现乱码，不建议。</p>
 
 <div class="foot">唯一入口：本文件。配置 <code>device/vivo/y52s/</code>，上游对照 <code>reference/</code>，
 证据 <code>device_dump/</code>，命令刷 <code>flash/</code>，云端编译 <code>.github/workflows/</code>，

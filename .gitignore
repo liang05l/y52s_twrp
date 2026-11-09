@@ -44,3 +44,6 @@ reference/y52s_official_recovery.img
 !flash/verify_final.sh
 !flash/verify_features.sh
 !flash/probe_user999_usb.sh
+!flash/probe_mtp_999.sh
+!flash/set_mtp_default_off.sh
+!flash/test_mtp_gate.sh
