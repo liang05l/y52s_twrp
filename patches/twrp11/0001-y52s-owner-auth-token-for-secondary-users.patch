@@ -1,0 +1,124 @@
+--- a/crypto/fscrypt/Decrypt.cpp
++++ b/crypto/fscrypt/Decrypt.cpp
+@@ -861,6 +861,103 @@
+ 	return false;
+ }
+ 
++/* ===========================================================================
++ * y52s / PD2057: owner auth token for secondary / DOUBLE_APP users.
++ *
++ * MEASURED on this device (root, 2026-11-09):
++ *   /data/system/users/userlist.xml          -> <user id="0"/> <user id="999"/>
++ *   /data/system_de/999/spblob/              -> own .pwd/.secdis/.spblob/.handle
++ *   /data/misc/keystore/user_0/              -> BOTH
++ *        1000_USRPKEY_synthetic_password_8b062251e4788049   (user 0)
++ *        1000_USRPKEY_synthetic_password_c977db9a6356c1ad   (user 999)
++ *   /data/misc/keystore/user_999/            -> only *_test keys, NO SP key
++ *
++ * So the profile's synthetic-password key is stored in the OWNER's keystore
++ * namespace (uid 1000, user 0). keystore binds such keys to the OWNER's
++ * gatekeeper SID, but Decrypt_User_Synth_Pass() verifies gatekeeper with
++ * fakeUid(user_id) (999), producing a token carrying the profile's SID.
++ * keystore then rejects the operation with
++ * KM_ERROR_KEY_USER_NOT_AUTHENTICATED (-26). Real device log:
++ *   [DEBUG] Decrypt_User: ENTER user_id=999
++ *   [SPBLOB] Found key file: .../user_0/1000_USRPKEY_synthetic_password_c977db9a6356c1ad
++ *   [SPBLOB] Got key characteristics successfully
++ *   [Keymaster] begin: km_error=-26
++ *   failed to unwrapSyntheticPasswordBlob
++ * while user 0 with the same PIN succeeds.
++ *
++ * Fix: re-verify gatekeeper with the OWNER's password handle (same LSKF,
++ * unified challenge) and put that token in /auth_token. keystore_auth then
++ * adds the owner token, which is what the profile's SP key is bound to.
++ * The application_id is NOT changed: it still comes from the profile's own
++ * password token + secdiscardable.
++ * =========================================================================== */
++static bool Write_Owner_Auth_Token(const std::string& Password) {
++    const std::string owner_path = "/data/system_de/0/spblob/";
++    std::string owner_handle;
++    if (!Find_Handle(owner_path, owner_handle)) {
++        printf("y52s: no owner spblob handle\n");
++        return false;
++    }
++    password_data_struct pwd0;
++    pwd0.salt = NULL;
++    pwd0.salt_len = 0;
++    pwd0.password_handle = NULL;
++    pwd0.handle_len = 0;
++    if (!Get_Password_Data(owner_path, owner_handle, &pwd0)) {
++        Free_Return(false, NULL, &pwd0);
++        return false;
++    }
++    if (pwd0.handle_len <= 0) {
++        printf("y52s: owner has no gatekeeper handle\n");
++        Free_Return(false, NULL, &pwd0);
++        return false;
++    }
++    unsigned char owner_token[PASSWORD_TOKEN_SIZE];
++    if (!Get_Password_Token(&pwd0, Password, &owner_token[0])) {
++        Free_Return(false, NULL, &pwd0);
++        return false;
++    }
++    void* gk_token = PersonalizedHashBinary(PERSONALIZATION_USER_GK_AUTH,
++                                            (char*)&owner_token[0], PASSWORD_TOKEN_SIZE);
++    if (!gk_token) {
++        Free_Return(false, NULL, &pwd0);
++        return false;
++    }
++    android::sp<android::hardware::gatekeeper::V1_0::IGatekeeper> gk =
++        android::hardware::gatekeeper::V1_0::IGatekeeper::getService();
++    if (gk == nullptr) {
++        free(gk_token);
++        Free_Return(false, NULL, &pwd0);
++        return false;
++    }
++    android::hardware::hidl_vec<uint8_t> handle_hidl;
++    handle_hidl.setToExternal(static_cast<uint8_t*>(pwd0.password_handle), pwd0.handle_len);
++    android::hardware::hidl_vec<uint8_t> token_hidl;
++    token_hidl.setToExternal(static_cast<uint8_t*>(gk_token), SHA512_DIGEST_LENGTH);
++    bool ok = false;
++    android::hardware::Return<void> hwRet = gk->verify(
++        fakeUid(0), 0 /* challenge */, handle_hidl, token_hidl,
++        [&ok](const android::hardware::gatekeeper::V1_0::GatekeeperResponse& rsp) {
++            if (rsp.code >= android::hardware::gatekeeper::V1_0::GatekeeperStatusCode::STATUS_OK) {
++                unlink("/auth_token");
++                FILE* f = fopen("/auth_token", "wb");
++                if (f != NULL) {
++                    fwrite(rsp.data.data(), sizeof(uint8_t), rsp.data.size(), f);
++                    fclose(f);
++                    ok = true;
++                    printf("y52s: owner auth token written (%zu bytes)\n", rsp.data.size());
++                }
++            }
++        });
++    free(gk_token);
++    Free_Return(false, NULL, &pwd0);   // frees pwd0.salt / pwd0.password_handle
++    if (!hwRet.isOk() || !ok) {
++        printf("y52s: owner gatekeeper verification failed\n");
++        return false;
++    }
++    return true;
++}
++
+ bool Free_Return(bool retval, void* weaver_key, password_data_struct* pwd) {
+ 	if (weaver_key)
+ 		free(weaver_key);
+@@ -1037,6 +1134,17 @@
+ 			printf("gatekeeper verification failed\n");
+ 			return Free_Return(retval, weaver_key, &pwd);
+ 		}
++
++		// y52s: secondary users (e.g. vivo DOUBLE_APP user 999) keep their
++		// synthetic-password key in the OWNER's keystore namespace. Replace
++		// the profile gatekeeper token with the owner's token before
++		// unwrapSyntheticPasswordBlob() starts keystore_auth. Without this,
++		// keystore answers KEY_USER_NOT_AUTHENTICATED (-26). See the helper
++		// above for the measured evidence.
++		if (user_id != 0) {
++			if (!Write_Owner_Auth_Token(Password))
++				printf("y52s: owner token unavailable, keeping profile token\n");
++		}
+ 	}
+ 	// Now we will handle https://android.googlesource.com/platform/frameworks/base/+/android-8.0.0_r23/services/core/java/com/android/server/locksettings/SyntheticPasswordManager.java#816
+ 	// Plus we will include the last bit that computes the disk decrypt key found in:

@@ -49,4 +49,12 @@ reference/y52s_official_recovery.img
 !flash/test_mtp_gate.sh
 !flash/probe_mtp_toggle.sh
 !flash/mtp_switch.sh
-!flash/backup_user999.sh
+!build/ci_hybrid.py
+# The user-999 patch filename contains "token", which the secrets rule
+# (*token*) would otherwise swallow.
+!patches/twrp11/
+!patches/twrp11/*.patch
+# Local investigation scratch (downloaded manifests, raw logs, test repos).
+.cache/
+flash/probe_u999_spblob.sh
+flash/probe_u999_system.sh

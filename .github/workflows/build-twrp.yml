@@ -21,6 +21,17 @@
 #                 + /dev/sda1 74G on /mnt (66G free), 6 h job limit.
 #   We free preinstalled toolchains, then put the ENTIRE source tree and out/
 #   on /mnt. Use -j4 (4 vCPU) to stay within 16 GB RAM.
+#
+# 2026-11-09 FIXES (see y52s_twrp_final.html chapter 18):
+#   1) ccache was 0.0/8.0 because TWRP-11 build/core/ccache.mk requires
+#      CCACHE_EXEC -- USE_CCACHE alone is a no-op in Android 11. Set it plus
+#      the documented cross-checkout cache settings, and fail fast if
+#      get_build_var CC_WRAPPER is empty.
+#   2) The device tree now carries the VERIFIED touch/HAL/USB payload and
+#      the official vivo-signed vbmeta; a post-build step grafts that vbmeta
+#      onto the compiled image (AOSP test key => km_error=-62, no decryption).
+#   3) patches/twrp11/0001 fixes -26 (KEY_USER_NOT_AUTHENTICATED) for
+#      vivo DOUBLE_APP user 999.
 # ===========================================================================
 name: Build TWRP 11 for vivo Y52s
 
@@ -29,9 +40,11 @@ on:
   push:
     branches: [main]
     paths:
-      # Only device-tree changes need a rebuild. Workflow/CI edits must NOT
-      # auto-trigger another 30-60 min sync + 33 min compile; use Run workflow.
+      # Only device-tree / patch changes need a rebuild. Workflow-only edits
+      # must NOT auto-trigger another 30-60 min sync + 33 min compile.
       - 'device/vivo/y52s/**'
+      - 'patches/twrp11/**'
+      - 'build/ci_hybrid.py'
 
 # A second manual run must not fight the previous one for the release.
 concurrency:
@@ -49,12 +62,26 @@ jobs:
       BRANCH: twrp-11
       DEVICE_PATH: device/vivo/y52s
       LUNCH_TARGET: omni_y52s-eng
+      # --- ccache: CCACHE_EXEC is MANDATORY in Android 11 --------------------
+      # build/core/ccache.mk: "So if you still want to use ccache, continue
+      # setting USE_CCACHE, but also set the CCACHE_EXEC environment variable
+      # to the path to your ccache executable." Without it CC_WRAPPER stays
+      # empty and `ccache -s` reports 0.0/8.0 (measured on run 2026-11-09).
       USE_CCACHE: 1
+      CCACHE_EXEC: /usr/bin/ccache
+      # Export the wrappers as environment too: Android 11 builds most C++ via
+      # soong, which reads CC_WRAPPER/CXX_WRAPPER from the environment. Without
+      # them only the make-based parts would be cached.
+      CC_WRAPPER: /usr/bin/ccache
+      CXX_WRAPPER: /usr/bin/ccache
       CCACHE_DIR: /mnt/ccache
-      # actions/cache allows 10 GB per repository (7-day LRU eviction).
-      # Keep ccache comfortably under that; the 40-60 GB source tree does
-      # not fit and still has to be synced each run.
       CCACHE_MAXSIZE: 8G
+      # Fresh `repo sync` every run changes mtimes; these are the values
+      # ccache.mk itself recommends so a warm cache across runners still hits.
+      CCACHE_COMPILERCHECK: content
+      CCACHE_BASEDIR: /
+      CCACHE_SLOPPINESS: time_macros,include_file_mtime,file_macro
+      CCACHE_CPP2: 'true'
 
     steps:
       - name: Checkout this (small) repository
@@ -81,12 +108,12 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: /mnt/ccache
-          key: ${{ runner.os }}-twrp11-ccache-${{ hashFiles('device/vivo/y52s/**') }}
+          key: ${{ runner.os }}-twrp11-ccache-${{ hashFiles('device/vivo/y52s/**', 'patches/twrp11/**') }}
           restore-keys: |
             ${{ runner.os }}-twrp11-ccache-
 
       - name: JDK 11 (Android 11 baseline)
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '11'
@@ -101,6 +128,16 @@ jobs:
             libgl1-mesa-dev libx11-dev lib32z1-dev || true
           python3 --version
           java -version
+
+      - name: Configure ccache (must be non-empty before the build)
+        run: |
+          set -e
+          test -x "$CCACHE_EXEC"
+          ccache -M "$CCACHE_MAXSIZE"
+          ccache -o compression=true
+          ccache -z
+          ccache -s
+          echo "CCACHE_EXEC=$CCACHE_EXEC  CCACHE_DIR=$CCACHE_DIR"
 
       - name: Install repo
         run: |
@@ -129,8 +166,18 @@ jobs:
             "$TWRP_WORK/$DEVICE_PATH/BoardConfig.mk"
           grep -q '^TW_INCLUDE_CRYPTO := true' "$TWRP_WORK/$DEVICE_PATH/BoardConfig.mk"
           grep -q '^TW_INCLUDE_FBE := true' "$TWRP_WORK/$DEVICE_PATH/BoardConfig.mk"
-          echo "--- prebuilt (measured from the real device) ---"
-          ls -lh "$TWRP_WORK/$DEVICE_PATH/prebuilt/"
+          echo "--- VERIFIED touch / HAL / firmware payload ---"
+          test -f "$TWRP_WORK/$DEVICE_PATH/recovery/root/system/bin/vts_app_recovery"
+          test -f "$TWRP_WORK/$DEVICE_PATH/recovery/root/vendor/bin/mcDriverDaemon"
+          test -f "$TWRP_WORK/$DEVICE_PATH/recovery/root/vendor/bin/hw/android.hardware.keymaster@4.0-service.trustonic"
+          echo "touch firmware blobs: $(find "$TWRP_WORK/$DEVICE_PATH/recovery/root/vendor/firmware" -type f | wc -l)"
+          echo "trustlets: $(find "$TWRP_WORK/$DEVICE_PATH/recovery/root/vendor/app/mcRegistry" -name '*.drbin' | wc -l)"
+          echo "--- official vivo AVB assets ---"
+          test -f "$TWRP_WORK/$DEVICE_PATH/avb/vbmeta_official.bin"
+          test -f "$TWRP_WORK/$DEVICE_PATH/avb/footer_official.bin"
+          grep -q 'y52s: configfs MTP switch' \
+            "$TWRP_WORK/$DEVICE_PATH/recovery/root/init.recovery.mt6853.rc"
+          ls -lh "$TWRP_WORK/$DEVICE_PATH/avb/"
 
       - name: repo sync
         working-directory: /mnt/twrp
@@ -139,11 +186,6 @@ jobs:
           df -h /mnt
           du -sh /mnt/twrp
 
-      # Regression guard for the first failed CI run (13:41 UTC): the product
-      # makefile inherited vendor/omni/config/common.mk, which the twrp-11 AOSP
-      # manifest does not provide, so lunch could not register omni_y52s.
-      # omni_vendor_omni/android-11's common.mk is Omni *system* content and is
-      # deliberately NOT cloned. Fail fast if that dependency ever comes back.
       - name: Assert product makefile needs no vendor/omni
         run: |
           set -e
@@ -155,17 +197,39 @@ jobs:
           fi
           echo "OK: product makefile is self-contained (AOSP product config only)"
 
+      # Source-level fixes are applied to the freshly synced tree. `git apply
+      # --check` makes a branch drift fail loudly instead of silently building
+      # an unpatched binary.
+      - name: Apply y52s source patches
+        run: |
+          set -e
+          cd "$TWRP_WORK/bootable/recovery"
+          for p in "$GITHUB_WORKSPACE"/patches/twrp11/*.patch; do
+            echo "--- $(basename "$p") ---"
+            git apply --check --verbose "$p"
+            git apply "$p"
+          done
+          echo "--- patch markers ---"
+          grep -n 'Write_Owner_Auth_Token' crypto/fscrypt/Decrypt.cpp | head -3
+          grep -q 'y52s: owner auth token written' crypto/fscrypt/Decrypt.cpp
+
       - name: Build recoveryimage
         working-directory: /mnt/twrp
         run: |
           set -e
           . build/envsetup.sh
           lunch "$LUNCH_TARGET"
-          ccache -M "$CCACHE_MAXSIZE" || true
+          # Fail fast if ccache is not actually wired into the compiler command.
+          WRAPPER="$(get_build_var CC_WRAPPER)"
+          echo "CC_WRAPPER=[$WRAPPER]"
+          if [ -z "$WRAPPER" ]; then
+            echo "::error::CC_WRAPPER is empty -- USE_CCACHE/CCACHE_EXEC not honoured"
+            exit 1
+          fi
+          ccache -z
           # DO NOT pipe through `tee /mnt/build.log`: /mnt itself is root-owned
-          # (we only chown /mnt/twrp and /mnt/ccache). tee cannot create a file
-          # there, and with pipefail that made a SUCCESSFUL 33:35 build exit 1
-          # while /mnt/build.log never existed, so the artifact step was skipped.
+          # (we only chown /mnt/twrp and /mnt/ccache). With pipefail that made
+          # a SUCCESSFUL build exit 1 while /mnt/build.log never existed.
           # GitHub captures stdout directly -- no extra log file is needed.
           if type mka >/dev/null 2>&1; then
             mka recoveryimage -j4
@@ -173,8 +237,20 @@ jobs:
             echo "::warning::mka unavailable, falling back to make"
             make recoveryimage -j4
           fi
+          echo "=== ccache after build ==="
+          ccache -s
           df -h /mnt
           ls -lh "out/target/product/y52s/recovery.img"
+
+      # The compiled image is signed with the AOSP test key. Graft the GENUINE
+      # vivo-signed vbmeta/footer (1728 B + 64 B, checked into the device tree)
+      # so the TEE sees boot.security_patch=2019-06-06 instead of 2099-12-31.
+      - name: 'Post-build: official vivo AVB hybrid'
+        run: |
+          set -e
+          python3 "$GITHUB_WORKSPACE/build/ci_hybrid.py" \
+            "$TWRP_WORK/out/target/product/y52s/recovery.img"
+          ls -lh "$TWRP_WORK/out/target/product/y52s/recovery.img"
 
       # restore/save split + always(): a build that fails downstream still
       # keeps its compiler cache for the next run. Duplicated keys are harmless.
@@ -191,17 +267,24 @@ jobs:
         run: |
           IMG="$TWRP_WORK/out/target/product/y52s/recovery.img"
           ls -lh "$IMG"
-          sha256sum "$IMG" | tee "$TWRP_WORK/out/target/product/y52s/recovery.img.sha256"
+          sha256sum "$IMG"
           python3 - "$IMG" <<'PY'
-          import sys, struct
-          b = open(sys.argv[1], 'rb').read(4096)
-          print('magic:', b[:8])
-          if b[:8] == b'ANDROID!':
-              v = struct.unpack_from('<10I', b, 8)
-              print('header_version=%d page_size=%d kernel_size=%d ramdisk_size=%d'
-                    % (v[8], v[7], v[0], v[2]))
-          else:
-              print('::warning::unexpected boot image magic')
+          import sys, struct, hashlib
+          p = sys.argv[1]
+          b = open(p, 'rb').read()
+          print('size:', len(b), 'magic:', b[:8])
+          assert b[:8] == b'ANDROID!'
+          v = struct.unpack_from('<10I', b, 8)
+          print('header_version=%d page_size=%d kernel_size=%d ramdisk_size=%d os_version=0x%08x'
+                % (v[8], v[7], v[0], v[2], v[9]))
+          f = b[-64:]
+          assert f[:4] == b'AVBf', 'official AVB footer missing'
+          vbo = struct.unpack_from('>Q', f, 20)[0]
+          vbs = struct.unpack_from('>Q', f, 28)[0]
+          vb = b[vbo:vbo+vbs]
+          assert vb[:4] == b'AVB0' and b'2019-06-06' in vb
+          print('official vbmeta at 0x%x (%d B), boot_patchlevel 2019-06-06 present' % (vbo, vbs))
+          print('SHA256', hashlib.sha256(b).hexdigest())
           PY
 
       # always(): never lose a successfully compiled image because an earlier
@@ -214,6 +297,7 @@ jobs:
           path: |
             /mnt/twrp/out/target/product/y52s/recovery.img
             /mnt/twrp/out/target/product/y52s/recovery.img.sha256
+            /mnt/twrp/out/target/product/y52s/recovery_ci_built.img
           if-no-files-found: warn
           retention-days: 30
           compression-level: 6
@@ -224,6 +308,8 @@ jobs:
           echo "### y52s TWRP 11 build" >> "$GITHUB_STEP_SUMMARY"
           echo "- manifest: \`$BRANCH\` (keystore2-free, matches Android 10 FBE)" >> "$GITHUB_STEP_SUMMARY"
           echo "- lunch: \`$LUNCH_TARGET\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- source patches: \`patches/twrp11/*.patch\` (user 999 owner auth token)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- AVB: official vivo-signed vbmeta/footer grafted post-build" >> "$GITHUB_STEP_SUMMARY"
           echo "- ccache (8G cap, 10 GB/repo cache limit):" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           ccache -s >> "$GITHUB_STEP_SUMMARY" 2>&1 || true

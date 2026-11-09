@@ -1,47 +1,281 @@
-# y52s: post-build device init. Every value below is copied from the
-# stock-based v7 image whose touch/USB/HAL behaviour was verified.
-# Touch firmware update lives in init.recovery.touch.rc, which v7's
-# init.recovery.usb.rc imports explicitly (deterministically loaded).
-# vivo's vts_app_recovery selects the panel firmware by
-# ro.vivo.product.model. It is ABSENT from prop.default (measured), so
-# without this the updater reports 'no firmware for product' and the
-# touchscreen stays dead even though /dev/input/event3 exists.
-# (Y73s DEVELOPMENT_LOG stage 2; verified on this device 13:25: with the
-#  prop set, TP-FW-PD2057-LCMID17-VER0x26.bin updates successfully.)
 on early-init
-    setprop ro.vivo.product.model PD2057
-    setprop ro.vendor.vivo.product.model PD2057
+    # 动态分区支持 - 启用 fastbootd 自动检测
+    setprop ro.boot.dynamic_partitions true
 
-service y52s_keymaster /vendor/bin/hw/android.hardware.keymaster@4.0-service.trustonic
+    # 设置产品型号 - 触控固件加载需要
+    setprop ro.vivo.product.model PD2057
+    setprop ro.product.model PD2057
+    setprop ro.product.board k6853v1_64_6360
+
+    # Vivo 硬件版本 - OTA 升级包验证需要 (从原厂 prop.default 提取)
+    setprop ro.vivo.hardware.version PD2057MA
+    setprop ro.vendor.vivo.hardware.version PD2057MA
+    setprop ro.vivo.system.hardware.version PD2057MA
+    setprop ro.hardware.bbk PD2057MA
+    setprop ro.board.bbk MA
+    setprop ro.build.expect.hardware PD2057MA
+    setprop ro.vivo.product.release.name PD2057
+    setprop ro.vivo.product.solution MTK
+    setprop ro.vivo.product.platform MTK6853
+    setprop ro.vendor.vivo.product.platform MTK6853
+
+    # FBE 加密属性 (从原厂 prop.default 提取)
+    setprop ro.crypto.volume.filenames_mode aes-256-cts
+
+    # SDK 版本必须匹配原厂 Android 10 (SDK 29)
+    # setprop 无法覆盖已设置的 ro. 属性，使用 resetprop
+    setprop ro.vndk.version 29
+    
+    # persist 目录
+    mkdir /mnt/vendor/persist 0771 system system
+    mkdir /persist 0771 system system
+    mkdir /protect_f 0771 system system
+    mkdir /protect_s 0771 system system
+    mkdir /nvdata 0771 system system
+    mkdir /nvcfg 0771 system system
+    symlink /mnt/vendor/persist /vendor/persist
+
+on init
+    # 使用 configfs USB 模式
+    setprop sys.usb.configfs 1
+    setprop sys.usb.ffs.aio_compat 1
+
+    # Fastbootd USB gadget 配置
+    mkdir /config/usb_gadget/g1/functions/ffs.fastboot
+    mkdir /dev/usb-ffs/fastboot 0770 system system
+    mount functionfs fastboot /dev/usb-ffs/fastboot rmode=0770,fmode=0660,uid=1000,gid=1000
+
+    # gatekeeper symlink
+    symlink /vendor/lib64/hw/libMcGatekeeper.so /vendor/lib64/hw/gatekeeper.k6853v1_64_6360.so
+
+on post-fs
+    # 使用 resetprop 强制修改 SDK 版本为 Android 10 (29) - 必须在解密前执行
+    exec u:r:recovery:s0 root root -- /system/bin/resetprop ro.build.version.sdk 29
+    exec u:r:recovery:s0 root root -- /system/bin/resetprop ro.system.build.version.sdk 29
+    exec u:r:recovery:s0 root root -- /system/bin/resetprop ro.vendor.build.version.sdk 29
+    exec u:r:recovery:s0 root root -- /system/bin/resetprop ro.product.build.version.sdk 29
+    exec u:r:recovery:s0 root root -- /system/bin/resetprop ro.odm.build.version.sdk 29
+    exec u:r:recovery:s0 root root -- /system/bin/resetprop ro.system_ext.build.version.sdk 29
+
+    # 自动检测并设置安全补丁级别 - 必须在 keymaster 启动前执行
+    # 从系统分区读取真实的 security patch level，解决 FBE 解密因日期不匹配失败的问题
+    # 注意: PRODUCT_COPY_FILES 不保留执行权限，需要先 chmod
+    chmod 0755 /system/bin/auto_patchlevel.sh
+    exec u:r:recovery:s0 root root -- /system/bin/auto_patchlevel.sh
+
+    # 清除 BCB 防止重启循环
+    chmod 0755 /system/bin/clear_bcb.sh
+    exec u:r:recovery:s0 root root -- /system/bin/clear_bcb.sh
+
+    # Support A/B feature for EMMC and UFS boot region
+    symlink /dev/block/sda /dev/block/mmcblk0boot0
+    symlink /dev/block/sdb /dev/block/mmcblk0boot1
+    symlink /dev/block/mmcblk0boot0 /dev/block/platform/bootdevice/by-name/preloader_a
+    symlink /dev/block/mmcblk0boot1 /dev/block/platform/bootdevice/by-name/preloader_b
+    symlink /dev/block/platform/bootdevice/by-name/preloader_a /dev/block/platform/bootdevice/by-name/preloader_emmc_a
+    symlink /dev/block/platform/bootdevice/by-name/preloader_b /dev/block/platform/bootdevice/by-name/preloader_emmc_b
+    symlink /dev/block/platform/bootdevice/by-name/preloader_a /dev/block/platform/bootdevice/by-name/preloader_ufs_a
+    symlink /dev/block/platform/bootdevice/by-name/preloader_b /dev/block/platform/bootdevice/by-name/preloader_ufs_b
+    symlink /dev/block/platform/bootdevice/by-name/preloader_a /dev/block/by-name/preloader_emmc_a
+    symlink /dev/block/platform/bootdevice/by-name/preloader_b /dev/block/by-name/preloader_emmc_b
+    symlink /dev/block/platform/bootdevice/by-name/preloader_a /dev/block/by-name/preloader_ufs_a
+    symlink /dev/block/platform/bootdevice/by-name/preloader_b /dev/block/by-name/preloader_ufs_b
+
+    # 挂载 persist 分区 - 必须在 mobicore 启动前挂载
+    wait /dev/block/by-name/persist
+    mount ext4 /dev/block/by-name/persist /mnt/vendor/persist noatime
+    
+    # persist 分区权限
+    chown system system /mnt/vendor/persist
+    chmod 0771 /mnt/vendor/persist
+    restorecon /mnt/vendor/persist
+    mkdir /mnt/vendor/persist/mcRegistry 0771 system system
+
+    # TEE/RPMB 设备权限 - ueventd 规则可能不生效，手动设置
+    chmod 0666 /dev/mobicore
+    chmod 0666 /dev/mobicore-user
+    chmod 0660 /dev/t-base-tui
+    chmod 0660 /dev/rpmb0
+    chown system system /dev/mobicore
+    chown system system /dev/mobicore-user
+    chown system system /dev/t-base-tui
+    chown system system /dev/rpmb0
+
+    # 启动 mobicore
+    start mobicore
+
+on post-fs-data
+    mkdir /data/vendor/key_provisioning 0771 system system
+
+on boot
+    # 执行触控固件更新
+    exec u:r:recovery:s0 root root -- /system/bin/vts_app_recovery --update
+    
+    # 启动加密解密相关服务
+    setprop recovery.service 1
+
+# 防止 USB 被永久禁用 (只在 persist 属性上)
+on property:persist.sys.usb.config=none
+    setprop persist.sys.usb.config adb
+
+# 注释掉这个，因为它会阻止MTP切换
+# on property:sys.usb.config=none
+#     setprop sys.usb.config adb
+
+# MTP FunctionFS 设置 (在 boot 阶段，此时 configfs 已就绪)
+on boot
+    mkdir /config/usb_gadget/g1/functions/ffs.mtp 0770 shell shell
+    mkdir /dev/usb-ffs/mtp 0770 shell shell
+    mount functionfs mtp /dev/usb-ffs/mtp rmode=0770,fmode=0660,uid=2000,gid=2000
+
+# MTP 模式配置 (configfs)
+on property:sys.usb.config=mtp && property:sys.usb.configfs=1 && property:sys.usb.ffs.mtp.ready=1
+    write /config/usb_gadget/g1/configs/b.1/strings/0x409/configuration "mtp"
+    write /config/usb_gadget/g1/idProduct 0x4ee1
+    symlink /config/usb_gadget/g1/functions/ffs.mtp /config/usb_gadget/g1/configs/b.1/f1
+    write /config/usb_gadget/g1/UDC ${sys.usb.controller}
+    setprop sys.usb.state ${sys.usb.config}
+
+# MTP + ADB 模式配置 (configfs)
+on property:sys.usb.config=mtp,adb && property:sys.usb.configfs=1 && property:sys.usb.ffs.mtp.ready=1 && property:sys.usb.ffs.ready=1
+    write /config/usb_gadget/g1/configs/b.1/strings/0x409/configuration "mtp_adb"
+    write /config/usb_gadget/g1/idProduct 0x4ee2
+    symlink /config/usb_gadget/g1/functions/ffs.mtp /config/usb_gadget/g1/configs/b.1/f1
+    symlink /config/usb_gadget/g1/functions/ffs.adb /config/usb_gadget/g1/configs/b.1/f2
+    write /config/usb_gadget/g1/UDC ${sys.usb.controller}
+    setprop sys.usb.state ${sys.usb.config}
+
+# 拦截 reboot recovery 命令
+on property:sys.powerctl=reboot,recovery
+    chmod 0755 /system/bin/rebootrecovery.sh
+    exec u:r:recovery:s0 root root -- /system/bin/rebootrecovery.sh
+
+# 禁用 keystore2
+on late-init
+    stop keystore2
+
+# 加密服务触发 - 启动所有需要的服务
+on property:recovery.service=1
+    stop keystore2
+    # Start keymaster and gatekeeper (HIDL services)
+    start vendor.keymaster-4-0-trustonic
+    start gatekeeper-1-0
+    exec_start wait_for_keymaster
+    # Start old keystore service for Android 10 password decryption
+    start keystore
+    start guardianangle
+
+# Mobicore TEE Daemon - 之前测试通过的配置
+service mobicore /vendor/bin/mcDriverDaemon --P1 /mnt/vendor/persist/mcRegistry     -r /vendor/app/mcRegistry/06090000000000000000000000000000.drbin     -r /vendor/app/mcRegistry/020f0000000000000000000000000000.drbin     -r /vendor/app/mcRegistry/05120000000000000000000000000000.drbin     -r /vendor/app/mcRegistry/05070000000000000000000000000000.drbin     -r /vendor/app/mcRegistry/030b0000000000000000000000000000.drbin     -r /vendor/app/mcRegistry/030c0000000000000000000000000000.drbin
+    disabled
+    seclabel u:r:recovery:s0
+
+
+service vendor.keymaster-4-0-trustonic /vendor/bin/hw/android.hardware.keymaster@4.0-service.trustonic
     disabled
     user root
     group root drmrpc
     seclabel u:r:recovery:s0
-    setenv LD_LIBRARY_PATH /system/lib64:/system_root/system/lib64:/system_root/system/lib64/vndk-29:/vendor/lib64:/vendor/lib64/hw
 
-service y52s_gatekeeper /vendor/bin/hw/android.hardware.gatekeeper@1.0-service
+service gatekeeper-1-0 /vendor/bin/android.hardware.gatekeeper@1.0-service
     disabled
     user root
     group root
     seclabel u:r:recovery:s0
-    setenv LD_LIBRARY_PATH /system/lib64:/system_root/system/lib64:/system_root/system/lib64/vndk-29:/vendor/lib64:/vendor/lib64/hw
 
-on init
-    setprop sys.usb.configfs 1
-    setprop sys.usb.ffs.aio_compat 1
-    setprop recovery.service 1
+service wait_for_keymaster /system/bin/wait_for_keymaster
+    disabled
+    user root
+    seclabel u:r:recovery:s0
 
-# mapper nodes do NOT exist at on init; 'exec' is synchronous so the
-# mounts are ready before the HAL services are started.
-on boot
-    exec u:r:recovery:s0 root root -- /sbin/sh /sbin/y52s_prepare.sh
-    start y52s_keymaster
-    start y52s_gatekeeper
 
-on property:twrp.modules.loaded=true
-    exec u:r:recovery:s0 root root -- /sbin/sh /sbin/y52s_prepare.sh
-    start y52s_keymaster
-    start y52s_gatekeeper
+service guardianangle /system/bin/guardianangle
+    disabled
+    user root
+    seclabel u:r:recovery:s0
 
-# USB gadget config lives in v7's configfs init.recovery.usb.rc
-# (replaced below); it already contains the MTP interception guards.
+
+# 旧版 keystore 服务 (原厂使用)
+service keystore_auth /system/bin/keystore_auth
+    disabled
+    user system
+    group root system
+    seclabel u:r:recovery:s0
+
+service keystore /system/bin/keystore /data/misc/keystore
+    disabled
+    user root
+    group root drmrpc readproc
+    seclabel u:r:recovery:s0
+
+# Fastbootd 服务 - 用于刷写动态分区
+service fastbootd /system/bin/fastbootd
+    disabled
+    group system
+    seclabel u:r:fastbootd:s0
+
+# Boot HAL 服务 - fastbootd 依赖
+service vendor.boot-hal-1-0 /system/bin/hw/android.hardware.boot@1.0-service
+    disabled
+    user root
+    group root
+    seclabel u:r:recovery:s0
+
+# Health HAL 服务 - fastbootd 依赖
+service health-hal-2-0 /system/bin/android.hardware.health@2.0-service
+    disabled
+    user root
+    group root
+    seclabel u:r:recovery:s0
+
+# Fastbootd USB 模式触发
+on property:sys.usb.config=fastboot
+    # 先停止 MTP 相关服务
+    setprop sys.usb.ffs.mtp.ready 0
+    setprop sys.usb.ffs.ready 0
+    write /config/usb_gadget/g1/UDC "none"
+    rm /config/usb_gadget/g1/configs/b.1/f1
+    rm /config/usb_gadget/g1/configs/b.1/f2
+    # 启动 fastbootd 依赖的 HAL 服务
+    start vendor.boot-hal-1-0
+    start health-hal-2-0
+    start fastbootd
+
+on property:sys.usb.config=fastboot && property:sys.usb.ffs.ready=1 && property:sys.usb.configfs=1
+    write /config/usb_gadget/g1/idProduct 0x4EE0
+    write /config/usb_gadget/g1/configs/b.1/strings/0x409/configuration "fastboot"
+    symlink /config/usb_gadget/g1/functions/ffs.fastboot /config/usb_gadget/g1/configs/b.1/f1
+    write /config/usb_gadget/g1/UDC ${sys.usb.controller}
+    setprop sys.usb.state ${sys.usb.config}
+
+on property:sys.usb.config=none && property:sys.usb.configfs=1
+    write /config/usb_gadget/g1/UDC "none"
+    stop fastbootd
+    setprop sys.usb.ffs.ready 0
+    rm /config/usb_gadget/g1/configs/b.1/f1
+    setprop sys.usb.state ${sys.usb.config}
+# y52s: configfs MTP switch (verified on device 2026-11-09)
+# TWRP's Enable_MTP() sets sys.usb.config=mtp,adb but NEVER sets
+# sys.usb.ffs.mtp.ready=1 (only Disable_MTP clears it), so the upstream
+# configfs action above can never fire. These two actions do the full
+# switch without that condition. MTP must be started AFTER decryption,
+# otherwise the PC caches encrypted filenames.
+on property:sys.usb.config=mtp,adb && property:sys.usb.configfs=1 && property:sys.usb.ffs.ready=1
+    write /config/usb_gadget/g1/UDC ""
+    rm /config/usb_gadget/g1/configs/b.1/f1
+    rm /config/usb_gadget/g1/configs/b.1/f2
+    write /config/usb_gadget/g1/idProduct 0x4ee2
+    symlink /config/usb_gadget/g1/functions/ffs.mtp /config/usb_gadget/g1/configs/b.1/f1
+    symlink /config/usb_gadget/g1/functions/ffs.adb /config/usb_gadget/g1/configs/b.1/f2
+    write /config/usb_gadget/g1/UDC ${sys.usb.controller}
+    setprop sys.usb.state ${sys.usb.config}
+
+on property:sys.usb.ffs.mtp.ready=0 && property:sys.usb.configfs=1
+    write /config/usb_gadget/g1/UDC ""
+    rm /config/usb_gadget/g1/configs/b.1/f1
+    rm /config/usb_gadget/g1/configs/b.1/f2
+    write /config/usb_gadget/g1/idProduct 0xd001
+    symlink /config/usb_gadget/g1/functions/ffs.adb /config/usb_gadget/g1/configs/b.1/f1
+    write /config/usb_gadget/g1/UDC ${sys.usb.controller}
+    setprop sys.usb.config adb
+    setprop sys.usb.state adb
