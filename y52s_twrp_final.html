@@ -1081,20 +1081,23 @@ keystore 找不到匹配条目 → <code>-26 KEY_USER_NOT_AUTHENTICATED</code>�
 新增 <code>Write_Owner_Auth_Token(Password)</code>，用同一个 LSKF 对 <strong>user 0</strong> 的 <code>.pwd</code> 重新计算 password token、以 <code>fakeUid(0)</code> 验证 gatekeeper，把机主 auth token 写回 <code>/auth_token</code>；
 在 <code>Decrypt_User_Synth_Pass()</code> 的 secdis 分支里，仅当 <code>user_id != 0</code> 时替换 token，<code>application_id</code> 仍用 999 自己的 password token + secdiscardable，不影响密钥派生。
 已在临时 git 仓库对 <code>TeamWin/android_bootable_recovery @ android-11</code> 的原始文件验证 <code>git apply --check</code> + <code>git apply</code> 全部通过；CI 的「Apply y52s source patches」步骤也会先 check 再 apply，源码漂移会直接失败而不是悄悄编出未打补丁的二进制。</p>
+<div class="block"><strong>第一次云端编译（run <code>42604087199</code>）在 83% 失败，已定位并修正</strong>：我把 helper 插在 <code>Free_Return()</code> 定义之前，编译报 6 处 <code>use of undeclared identifier 'Free_Return'</code>（<code>Decrypt.cpp:907/912/917/923/930/953</code>）。
+补一行前向声明 <code>bool Free_Return(bool, void*, password_data_struct*);</code> 后重新生成补丁、重新验证 <code>git apply</code>，提交 <code>1e56af4</code> 触发 run <code>42608781513</code>。
+同一份日志也给出了 ccache 修复的<strong>硬证据</strong>：<code>CC_WRAPPER=[/usr/bin/ccache]</code>，且实际的 clang++ 命令行以 <code>/usr/bin/ccache prebuilts/clang/.../clang++</code> 开头 —— 编译确实经过 ccache，不再是 0%。失败运行的缓存已由 <code>always()</code> 保存，第二轮会大量命中。</div>
 <p>对照源码已归档：<code>reference/twrp11/</code>（TWRP 11 解密相关文件）、<code>reference/twrp12/vold_Decrypt.cpp</code>、<code>reference/y73s/patches/system_vold/</code>（Y73s 的 6 个 vold 补丁）。</p>
 
 <h3>18.7 状态、已验证 / 未验证边界与下一步</h3>
 <table>
   <tr><th>项</th><th>状态</th></tr>
   <tr><td>越权脚本</td><td>已删除，引用已清理</td></tr>
-  <tr><td>ccache</td><td>根因锁定并修复；<code>CC_WRAPPER</code> 断言 + 构建后统计。真实命中率需等本轮编译结束看 summary</td></tr>
+  <tr><td>ccache</td><td><strong>已实证生效</strong>：日志 <code>CC_WRAPPER=[/usr/bin/ccache]</code>、实际 clang++ 命令以 ccache 开头；Actions 缓存条目从旧键 <strong>0.0 MB</strong> 变成新键 <strong>375.5 MB</strong>（<code>Linux-twrp11-ccache-d01b…</code>，11:18 保存）。第二轮构建会命中这批对象</td></tr>
   <tr><td>设备树同步</td><td>CI 前置断言全部通过（本地复刻 + 云端实际步骤均 success）</td></tr>
   <tr><td>源码补丁</td><td>本地 <code>git apply</code> 通过，云端「Apply y52s source patches」success</td></tr>
-  <tr><td>新镜像真机验证</td><td><strong>未验证</strong>：云端构建 run <code>42604087199</code> 正在编译（约 30–60 分钟），产物尚未刷入</td></tr>
+  <tr><td>新镜像真机验证</td><td><strong>未验证</strong>：run <code>42604087199</code> 因补丁编译错误失败（已修）；修正后的 run <code>42608781513</code> 正在编译，产物尚未刷入</td></tr>
 </table>
 <p>取证时还发现：<strong>设备 recovery 分区当时并不是 <code>a3855ed4…</code>，而是你后来刷入的 CI 产物</strong>——boot 头 <code>os_version=0x16000172</code>（16.0.0 / 2099-12），正是 TEE 判定密钥过期的值，也解释了「没触摸、解不了密」。
 已用 <code>flash_recovery.ps1</code> 把 <strong>已完整验证的 <code>a3855ed4…</code></strong> 刷回，回读哈希一致、<code>/data</code> 未动；设备当前在系统态。</p>
-<p>等 run <code>42604087199</code> 出产物后，下一步是：下载 <code>y52s-twrp11-recovery</code> → 核对官方 vbmeta 与补丁标记 → 刷入 → 重启进 TWRP 输密码 → 检查 <code>twrp.user.999.decrypt</code> 与 <code>/data/user/999</code> 是否明文。
+<p>等 run <code>42608781513</code> 出产物后，下一步是：下载 <code>y52s-twrp11-recovery</code> → 核对官方 vbmeta 与补丁标记 → 刷入 → 重启进 TWRP 输密码 → 检查 <code>twrp.user.999.decrypt</code> 与 <code>/data/user/999</code> 是否明文。
 ⚠️ 数据始终完好，全程未执行 <code>format/wipe</code>；别点 Format Data。</p>
 
 <div class="foot">唯一入口：本文件。配置 <code>device/vivo/y52s/</code>，上游对照 <code>reference/</code>，
