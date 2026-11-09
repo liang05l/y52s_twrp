@@ -27,3 +27,6 @@ build/*
 .git-credentials
 .env
 *token*
+!flash/adb_fix.ps1
+!flash/verify_and_return.ps1
+!flash/fix_boot_loop.sh

@@ -683,6 +683,33 @@ fastboot 仅能用于读取变量和重启。这与之前实测「系统里能 d
 （系统里 adb + Magisk root 一直可用），或再按音量上+电源进 fastboot 告诉我。
 adb 一上线，我一条 <code>flash_and_verify.ps1</code> 就能完成刷入与全部验证。</div>
 
+<h3>12.7 12:55 追加 — 已刷入首选镜像、系统正常、adb 冲突已修</h3>
+<p>你手动把 <code>build/recovery.img</code> 刷进去了。系统侧实测回显：</p>
+<div class="cmd">sha256sum /dev/block/by-name/recovery
+  54acf0f8e0b5c043403a2238f812552c8c8321584a8d874cefbc10483f233cac  ← 与产物完全一致
+su -c id                 uid=0(root) ... u:r:magisk:s0
+misc BCB command(32B)   全 0 → boot-recovery 已清，正常开机进系统
+ro.product.model         V2057A   |  ro.build.version.bbk  PD2057_A_1.16.4
+ro.crypto.type=file     ro.crypto.state=encrypted
+sys.usb.config           charging,adb   |  persist.sys.usb.config=adb
+/data/media/0            95 个正常条目（数据完好）</div>
+<p><strong>「开机也进 rec」的原因</strong>：昨晚那版残留的 <code>misc</code> BCB
+<code>boot-recovery</code>；现在读出来已是全 0，所以这版能正常进系统。已加
+<code>flash/fix_boot_loop.sh</code> 做只读核对 + 清 BCB（只清 32 字节 command 字段，不碰 <code>/data</code>）。</p>
+<p><strong>「开了 USB 但 adb 连不上」的原因</strong>：不是手机、也不是线——PC 上有个
+<strong>旧版 adb server（v32，来自 33.0.0 的那个 adb）占着 5037</strong>，
+新版 client（v41）报 <code>adb server version (32) doesn't match this client (41); killing...</code>
+重启后立刻 <code>MBLF9LSONZPJG69L device</code>。手机 USB 调试一直是开的
+（<code>sys.usb.config=charging,adb</code>，PnP 有 <code>USB\VID_2D95&amp;PID_6013&amp;MI_01</code> ADB Interface）。
+已固化 <code>flash/adb_fix.ps1</code>：停掉所有 adb.exe → 只用已验证的 37.0.0 重启 server → 重扫，实测通过。<strong>以后别同时运行搞机助手的 33.0.0 adb</strong>。</p>
+<p><strong>新增 <code>flash/verify_and_return.ps1</code></strong>：一条命令完成
+「系统 → reboot recovery → 等 TWRP → 跑 <code>verify_twrp.sh</code> 抓触摸/解密证据 →
+清 BCB → 自动 reboot 回系统」，验证完不会把手机留在 recovery，也不会再出现开机进 rec。</p>
+<div class="block"><strong>当前状态</strong>：设备稳定在 Android 系统、adb 在线、recovery 分区是
+<code>54acf0f8…</code>。<strong>我没有擅自重启进 recovery</strong>（你刚回到系统，且每次进 rec 都曾掉线）。
+你说一声，我立刻跑 <code>verify_and_return.ps1</code> 验证触摸与 FBE 解密，并自动回系统；
+若解密仍失败，再改刷备选 <code>5674bd57…</code>。⚠️ 别点 Format Data。</div>
+
 <div class="foot">唯一入口：本文件。配置 <code>device/vivo/y52s/</code>，上游对照 <code>reference/</code>，
 证据 <code>device_dump/</code>，命令刷 <code>flash/</code>，云端编译 <code>.github/workflows/</code>，
 产物取证 <code>build/inspect_ci_image.py</code>。未列出来源的参数保持 PENDING。</div>
