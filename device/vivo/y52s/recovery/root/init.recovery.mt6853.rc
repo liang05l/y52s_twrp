@@ -28,6 +28,8 @@ service y52s_gatekeeper /vendor/bin/hw/android.hardware.gatekeeper@1.0-service
     setenv LD_LIBRARY_PATH /system_root/system/lib64:/system_root/system/lib64/vndk-29:/vendor/lib64:/vendor/lib64/hw
 
 on init
+    setprop sys.usb.configfs 1
+    setprop sys.usb.ffs.aio_compat 1
     setprop recovery.service 1
     exec_start y52s_prepare
     start y52s_keymaster
@@ -40,12 +42,5 @@ on property:twrp.modules.loaded=true
     start y52s_gatekeeper
     start touchupdate
 
-# keep adb available; TWRP otherwise switches USB to MTP
-on property:sys.usb.config=mtp
-    setprop sys.usb.config adb
-
-on property:sys.usb.config=mtp,adb
-    setprop sys.usb.config adb
-
-on property:sys.usb.config=adb,mtp
-    setprop sys.usb.config adb
+# USB gadget config lives in v7's configfs init.recovery.usb.rc
+# (replaced below); it already contains the MTP interception guards.

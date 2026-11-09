@@ -249,6 +249,8 @@ y52s_rc = (
     + service_block("y52s_keymaster") + "\n"
     + service_block("y52s_gatekeeper") + "\n"
     "on init\n"
+    "    setprop sys.usb.configfs 1\n"          # v7, measured: device uses configfs
+    "    setprop sys.usb.ffs.aio_compat 1\n"
     "    setprop recovery.service 1\n"
     "    exec_start y52s_prepare\n"
     "    start y52s_keymaster\n"
@@ -259,8 +261,8 @@ y52s_rc = (
     "    start y52s_keymaster\n"
     "    start y52s_gatekeeper\n"
     "    start touchupdate\n\n"
-    "# keep adb available; TWRP otherwise switches USB to MTP\n"
-    + mtp
+    "# USB gadget config lives in v7's configfs init.recovery.usb.rc\n"
+    "# (replaced below); it already contains the MTP interception guards.\n"
 )
 rc_name = "init.recovery.mt6853.rc"
 assert rc_name not in ci_by
@@ -305,18 +307,29 @@ prop["data"] = "".join(out).encode()
 print("version props changed:", n)
 
 # ---------------------------------------------------------------------------
-# 4) MTP interception in CI's own usb.rc (keep its line endings)
+# 4) USB: replace the CI build's android_usb rc with v7's CONFIGFS rc.
+#
+# Measured: CI init.recovery.usb.rc is 1323 B with 0 "configfs" and 19
+# "android_usb" references; v7's is 5185 B with 11 "configfs" references and
+# already contains the y52s MTP interception. This device uses a configfs USB
+# gadget, so the CI rc never brings up adb -- that is why "adb devices" stayed
+# empty every time we booted the CI-based image into TWRP (13:05 run: 180 s,
+# no adb, USB not enumerated at all). Appending MTP guards to the wrong rc
+# could not fix it; the whole implementation must be the configfs one.
 # ---------------------------------------------------------------------------
 usb = ci_by["init.recovery.usb.rc"]
-u = usb["data"].decode("utf-8", "replace")
-if "y52s" not in u:
-    nl = eol_of(usb["data"])
-    block = ("\n# y52s v7: keep adb usable; never let TWRP switch USB to MTP.\n"
-             + mtp.rstrip("\n") + "\n")
-    if nl == "\r\n":
-        block = block.replace("\n", "\r\n")
-        u = u.rstrip("\r\n") + "\r\n"
-    usb["data"] = (u + block).encode()
+v7_usb = v7_by["init.recovery.usb.rc"]["data"]
+assert b"configfs" in v7_usb and b"y52s" in v7_usb, "v7 configfs usb.rc unexpected"
+usb["data"] = v7_usb
+usb["fields"][1] = v7_by["init.recovery.usb.rc"]["fields"][1]
+print("usb.rc replaced with v7 configfs version (%d bytes)" % len(v7_usb))
+
+# Persist the same USB rc into the device tree so future CI builds are born
+# with a working adb/MTP configuration.
+dt_usb = os.path.join(ROOT, "device", "vivo", "y52s", "recovery", "root",
+                      "init.recovery.usb.rc")
+open(dt_usb, "wb").write(v7_usb)
+os.chmod(dt_usb, 0o750)
 
 # ---------------------------------------------------------------------------
 # rebuild

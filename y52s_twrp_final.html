@@ -710,6 +710,36 @@ sys.usb.config           charging,adb   |  persist.sys.usb.config=adb
 你说一声，我立刻跑 <code>verify_and_return.ps1</code> 验证触摸与 FBE 解密，并自动回系统；
 若解密仍失败，再改刷备选 <code>5674bd57…</code>。⚠️ 别点 Format Data。</div>
 
+<h3>12.8 13:05 追加 — 「进 TWRP 又回系统」不是目标；USB 根因已定位并修好</h3>
+<p>13:05 那次 <code>verify_and_return.ps1</code> 等了 180 秒，<strong>TWRP 始终没有暴露 adb</strong>，
+USB 完全不枚举。你问「进 twrp 回系统干啥」——对，那个来回只是我为了不把你卡在 recovery
+设计的<strong>取证保护动作，不是适配目标</strong>；目标是 TWRP 本身能用。已把该脚本
+<strong>默认改成停在 TWRP</strong>（只清 BCB，不自动 reboot 回系统），只有显式加
+<code>-ReturnToSystem</code> 才回去。</p>
+<p><strong>为什么 TWRP 里 adb 一直起不来（终于找到实现层根因）</strong>：</p>
+<table>
+  <tr><th></th><th>v7（adb 正常）</th><th>CI 编译版（adb 不枚举）</th></tr>
+  <tr><td><code>init.recovery.usb.rc</code></td><td>5185 B，<strong>configfs</strong> 实现（11 处 configfs），含 y52s MTP 拦截</td><td>1323 B，<strong>android_usb 旧式</strong>（19 处 android_usb，0 处 configfs）</td></tr>
+  <tr><td><code>init.recovery.mt6853.rc</code></td><td><code>on init setprop sys.usb.configfs 1</code></td><td>缺这一行</td></tr>
+</table>
+<p>这台机器用 configfs USB gadget，CI 那份 rc 写的 <code>/sys/class/android_usb/android0/*</code>
+在本机根本不存在 → gadget 起不来 → adb 不枚举。
+此前 v7 的「默认关 MTP」修复我只把 MTP 拦截段<strong>追加到了错误实现的 rc 上</strong>，
+没换实现，所以每次进 TWRP 还是会掉线。这就是反复「进 rec / 回系统」的真正原因。</p>
+<p><strong>已修</strong>：<code>postprocess_ci.py</code> 现在把 <code>init.recovery.usb.rc</code>
+<strong>整体替换</strong>为 v7 的 configfs 版本，并在 <code>init.recovery.mt6853.rc</code> 补上
+<code>setprop sys.usb.configfs 1</code> / <code>sys.usb.ffs.aio_compat 1</code>（均为 v7 实测值）；
+同一份 usb.rc 也已写进 <code>device/vivo/y52s/recovery/root/</code> 供云端编译直接自带。
+新产物 <code>build/recovery.img</code> sha256 <code>452be5a5…</code>，离线校验：
+usb.rc 5185 B / configfs 11 处、触摸固件 14 个、AVB 仍为原厂 vivo 公钥、主程序带 FBE。</p>
+<div class="block"><strong>当前死锁</strong>：设备上跑的仍是旧镜像 <code>54acf0f8…</code>，
+它把 USB 弄得不枚举，所以新镜像<strong>暂时刷不进去</strong>（要刷就得先有 USB）。
+另 <code>adb reboot recovery</code> 写过 <code>boot-recovery</code> BCB、脚本失败时没来得及清。
+<strong>需要一次物理操作</strong>：长按电源 10 秒以上强制关机再正常开机进系统
+（系统里 adb + Magisk root 一直是好的），或按音量上+电源进 fastboot 告诉我。
+连上后我立刻刷 <code>452be5a5…</code>、清 BCB、重进 TWRP 并<strong>停在那里</strong>验证触摸与解密——
+这次 adb 应该自己就可用，不用再手动关 MTP，也不用再来回切系统。⚠️ 别点 Format Data。</div>
+
 <div class="foot">唯一入口：本文件。配置 <code>device/vivo/y52s/</code>，上游对照 <code>reference/</code>，
 证据 <code>device_dump/</code>，命令刷 <code>flash/</code>，云端编译 <code>.github/workflows/</code>，
 产物取证 <code>build/inspect_ci_image.py</code>。未列出来源的参数保持 PENDING。</div>
