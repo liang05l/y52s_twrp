@@ -16,6 +16,7 @@ build/*
 !build/inspect_ci_image.py
 !build/postprocess_ci.py
 !build/make_hybrid.py
+!build/port_y73s.py
 
 # Never upload secrets, credentials or private keys.
 *.pem
