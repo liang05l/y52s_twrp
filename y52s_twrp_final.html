@@ -1187,6 +1187,20 @@ clang-12: error: linker command failed with exit code 1</pre>
 <p>直接复用用户 0 解密时写入的 69 字节机主 <code>HW_AUTH_TOKEN</code>，让 <code>unwrapSyntheticPasswordBlob()</code> 走 <code>if (auth_token_len &gt; 0)</code> 分支、把机主 token 传给 keymaster <code>begin()</code>。<strong><code>application_id</code> 故意不动</strong>：在 <code>"!"</code> 这次尝试里，TWRP 已经用 <code>default-password</code> + 999 自己的 secdiscardable 算出它，对无独立 LSKF 的分身用户正是正确绑定。同时同步更新了 <code>apply_ci12_patches.sh</code> 的两个标记断言、workflow 产物校验、以及两个真机验收脚本。本地「0002→0003→0004→0006→0007 + MTP + 链接补丁」全链预演通过，括号配平、hook 位置断言为真。</p>
 <div class="block">提交 <code>66c2b36</code> → <strong>run <code>42643184822</code></strong>（15:17 UTC）。产物出来后下载 → 离线校验 → 刷入 → 重启 → 你再输一次 PIN，读 <code>twrp.user.999.decrypt</code> 与 <code>y52s: reusing owner auth token</code> 定论。</div>
 
+<h3>18.13 修复版构建成功并已刷入：只差最后一次输 PIN</h3>
+<p>run <code>42643184822</code> 于 15:45 UTC <strong>completed success</strong>。产物 <code>build/ci12fix/recovery.img</code> = <strong><code>5a4ac1ce…</code></strong>（96 MiB）。离线校验全绿：</p>
+<table>
+  <tr><td>新补丁</td><td><code>y52s: reusing owner auth token</code> / <code>y52s: no owner auth token</code> 已编译进 <code>system/bin/recovery</code> 与 <code>libtar.so</code>；旧 helper <code>Write_Owner_Auth_Token</code>、旧标记 <code>y52s: owner auth token written</code> <strong>均已消失</strong></td></tr>
+  <tr><td>不变项</td><td>官方 vivo vbmeta（<code>4bdf3ccd…</code> / <code>2019-06-06</code>，1728 B @ <code>0x37b1800</code>）、<code>os_version=0x14000172</code>、3696 ramdisk 条目、14 触摸固件、41 trustlet、keymaster@4.0 运行时库、MTP configfs 开关 —— 与上一版 <code>b546ccc8…</code> 逐项一致</td></tr>
+</table>
+<p>刷入没有走「重启回系统 → 命令刷」的老路径：TWRP 内 <code>/tmp</code> 有 3.6 GB、已是 root，直接 <code>adb push</code> + <code>dd of=/dev/block/by-name/recovery</code>（2.3 s + 0.7 s），<strong>分区回读哈希 <code>5a4ac1ce…</code> 与产物一致</strong>，清 BCB 后 <code>reboot recovery</code>，省掉一次完整重启。重启后确认：</p>
+<ul>
+  <li>运行中的 <code>/system/bin/recovery</code> 里能 grep 到两个<strong>新</strong>标记（各 1 次）——加载的确是新二进制，不是旧会话残留</li>
+  <li><code>Loading page decrypt_pin</code>、<code>Is encrypted, do decrypt page first</code>、<code>Set page: 'decrypt_users'</code> 均已出现，DE 密钥链正常（<code>km_error=0</code>）</li>
+  <li>BCB 全 0；触摸、adb、<code>tw_mtp_enabled=0</code> 正常</li>
+</ul>
+<div class="block"><strong>唯一剩下一步</strong>：在 TWRP 屏幕上输锁屏 PIN。TWRP 会先解主用户 0（把机主 token 写入 <code>/auth_token</code>），再自动对 999 试 PIN 与默认密码 <code>"!"</code>；新补丁会在第二次尝试时把机主 token 交给 keymaster。输完告诉我，我读 <code>twrp.user.999.decrypt</code>、<code>y52s: reusing owner auth token (69 bytes) for user 999</code> 与 <code>/data/user/999</code> 明文情况给出定论。回退 <code>build/recovery.img</code>（<code>a3855ed4…</code>）始终保留；全程未 format / wipe。</div>
+
 <div class="foot">唯一入口：本文件。配置 <code>device/vivo/y52s/</code>，上游对照 <code>reference/</code>，
 证据 <code>device_dump/</code>，命令刷 <code>flash/</code>，TWRP 11 补丁 <code>patches/twrp11/</code>（存档），
 12.1 解密补丁 <code>patches/system_vold/</code>，CI 流水线 <code>build/{prepare_ci12_tree.py,apply_ci12_patches.sh,postprocess_ci12.py}</code>。未列出来源的参数保持 PENDING。</div>

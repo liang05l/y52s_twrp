@@ -22,5 +22,5 @@ timeout 5 /system/bin/twrp get tw_mtp_enabled 2>&1 | head -2
 getprop sys.usb.config
 grep -A2 'vivo_ts' /proc/bus/input/devices 2>/dev/null | head -4
 echo "=== PATCH BINARY MARKER ==="
-grep -ac 'y52s: owner auth token written' /system/lib64/libtwrpfscrypt.so /sbin/recovery /system/bin/recovery 2>/dev/null | head -5
+grep -ac 'y52s: reusing owner auth token' /system/lib64/libtwrpfscrypt.so /sbin/recovery /system/bin/recovery 2>/dev/null | head -5
 echo "=== END ==="

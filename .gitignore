@@ -75,3 +75,6 @@ build/ci12/*.img
 !flash/probe_u999_fail.sh
 !flash/probe_u999_full.sh
 !flash/probe_u999_spblob_layout.sh
+!build/ci12fix/
+build/ci12fix/*.img
+!build/ci12fix/recovery.img.sha256
