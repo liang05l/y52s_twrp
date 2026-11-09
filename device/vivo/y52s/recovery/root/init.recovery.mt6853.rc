@@ -1,46 +1,47 @@
 # y52s: post-build device init. Every value below is copied from the
 # stock-based v7 image whose touch/USB/HAL behaviour was verified.
-import /init.recovery.touch.rc
-
-service touchupdate /system/bin/vts_app_recovery --update
-    user root
-    group root
-    disabled
-    seclabel u:r:recovery:s0
-
-service y52s_prepare /sbin/sh /sbin/y52s_prepare.sh
-    disabled
-    oneshot
-    seclabel u:r:recovery:s0
+# Touch firmware update lives in init.recovery.touch.rc, which v7's
+# init.recovery.usb.rc imports explicitly (deterministically loaded).
+# vivo's vts_app_recovery selects the panel firmware by
+# ro.vivo.product.model. It is ABSENT from prop.default (measured), so
+# without this the updater reports 'no firmware for product' and the
+# touchscreen stays dead even though /dev/input/event3 exists.
+# (Y73s DEVELOPMENT_LOG stage 2; verified on this device 13:25: with the
+#  prop set, TP-FW-PD2057-LCMID17-VER0x26.bin updates successfully.)
+on early-init
+    setprop ro.vivo.product.model PD2057
+    setprop ro.vendor.vivo.product.model PD2057
 
 service y52s_keymaster /vendor/bin/hw/android.hardware.keymaster@4.0-service.trustonic
     disabled
     user root
     group root drmrpc
     seclabel u:r:recovery:s0
-    setenv LD_LIBRARY_PATH /system_root/system/lib64:/system_root/system/lib64/vndk-29:/vendor/lib64:/vendor/lib64/hw
+    setenv LD_LIBRARY_PATH /system/lib64:/system_root/system/lib64:/system_root/system/lib64/vndk-29:/vendor/lib64:/vendor/lib64/hw
 
 service y52s_gatekeeper /vendor/bin/hw/android.hardware.gatekeeper@1.0-service
     disabled
     user root
     group root
     seclabel u:r:recovery:s0
-    setenv LD_LIBRARY_PATH /system_root/system/lib64:/system_root/system/lib64/vndk-29:/vendor/lib64:/vendor/lib64/hw
+    setenv LD_LIBRARY_PATH /system/lib64:/system_root/system/lib64:/system_root/system/lib64/vndk-29:/vendor/lib64:/vendor/lib64/hw
 
 on init
     setprop sys.usb.configfs 1
     setprop sys.usb.ffs.aio_compat 1
     setprop recovery.service 1
-    exec_start y52s_prepare
+
+# mapper nodes do NOT exist at on init; 'exec' is synchronous so the
+# mounts are ready before the HAL services are started.
+on boot
+    exec u:r:recovery:s0 root root -- /sbin/sh /sbin/y52s_prepare.sh
     start y52s_keymaster
     start y52s_gatekeeper
-    start touchupdate
 
 on property:twrp.modules.loaded=true
-    exec_start y52s_prepare
+    exec u:r:recovery:s0 root root -- /sbin/sh /sbin/y52s_prepare.sh
     start y52s_keymaster
     start y52s_gatekeeper
-    start touchupdate
 
 # USB gadget config lives in v7's configfs init.recovery.usb.rc
 # (replaced below); it already contains the MTP interception guards.

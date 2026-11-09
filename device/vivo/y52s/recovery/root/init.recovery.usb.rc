@@ -1,6 +1,6 @@
-import /init.recovery.mt6833.rc
-import /init.recovery.svc.rc
-import /init.recovery.platform.rc
+# import /init.recovery.mt6833.rc
+# import /init.recovery.svc.rc
+# import /init.recovery.platform.rc
 import /init.recovery.touch.rc
 #import /init.recovery.wifi.rc
 

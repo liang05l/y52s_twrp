@@ -740,6 +740,43 @@ usb.rc 5185 B / configfs 11 处、触摸固件 14 个、AVB 仍为原厂 vivo �
 连上后我立刻刷 <code>452be5a5…</code>、清 BCB、重进 TWRP 并<strong>停在那里</strong>验证触摸与解密——
 这次 adb 应该自己就可用，不用再手动关 MTP，也不用再来回切系统。⚠️ 别点 Format Data。</div>
 
+<h3>12.9 13:30 追加 — 触摸的真实根因：<code>ro.vivo.product.model</code> 缺失</h3>
+<p>用户连续反馈「没触摸」。取证链逐层排除：</p>
+<ul>
+  <li><code>/dev/input/event3</code> = <code>vivo_ts</code> 存在，<code>ABS_MT_POSITION_X/Y</code> = 1079/2407、<code>INPUT_PROP_DIRECT</code> —— 驱动和节点都在；</li>
+  <li>TWRP 主进程 <code>/proc/388/fd</code> <strong>确实打开了 event3</strong>（fd 6/7）—— GUI 在读设备；</li>
+  <li>三份镜像（v7 / CI / Y73s）都<strong>没有</strong> <code>.idc</code>/<code>.kl</code> 文件 —— 不是输入配置缺失。</li>
+</ul>
+<p>Y73s <code>DEVELOPMENT_LOG.md</code> 第二阶段「触摸屏修复」给出答案：vivo 的
+<code>vts_app_recovery</code> 靠 <strong><code>ro.vivo.product.model</code></strong> 选触摸固件，
+必须在 <code>on early-init</code> 设好。本机实测该属性为 <code>PD2057</code>，
+而 v7/CI 的 <code>prop.default</code> 里<strong>根本没有这一项</strong>。</p>
+<div class="cmd">运行时验证（不刷镜像）：
+  setprop ro.vivo.product.model PD2057            → 成功（ro.product.model 已存在 V2057A，setprop 报 0xb，无害）
+  /system/bin/vts_app_recovery --update
+    no firmware for product:PD2057, lcmid = 17 , type = 2
+    starting update firmwar:TP-FW-PD2057-LCMID17-VER0x26.bin
+    update firmware ... success!!</div>
+<p>属性补上后固件更新程序立刻找到并写入了 PD2057 固件；此前它选不到固件，
+面板不上报事件——节点在、GUI 也在读，但就是没有事件。<strong>已固化</strong>：
+<code>init.recovery.mt6853.rc</code> 的 <code>on early-init</code> 设置
+<code>ro.vivo.product.model</code> / <code>ro.vendor.vivo.product.model</code> 为 <code>PD2057</code>。</p>
+<p><strong>同时修好的</strong>：rc 显式加载（不再依赖 <code>${ro.hardware}</code>）、
+<code>on boot exec vts_app_recovery --update</code>、等待 mapper 节点的
+<code>y52s_prepare.sh</code>、<code>LD_LIBRARY_PATH</code> 首项改为 <code>/system/lib64</code>、
+注入缺失的 <code>libpuresoftkeymasterdevice.so</code>（否则 keymaster 一直 <code>restarting</code>）。
+重启后实测：分区 <code>57d2f443…</code>、<code>ro.vivo.product.model=PD2057</code> 自动生效、
+<code>y52s_keymaster/y52s_gatekeeper</code> 都 <code>running</code>、<code>/vendor</code> 已挂、adb 正常。</p>
+<div class="block"><strong>待确认</strong>：已在设备后台启动
+<code>getevent -l /dev/input/event3 &gt; /tmp/y52s_touch_events.txt</code> 采样。
+请<strong>现在点几下屏幕</strong>：
+有原始事件 → TWRP 二进制输入解析问题（换 Y73s 移植版）；
+无原始事件 → 面板/固件层问题（继续查）。这是唯一不靠猜的分界点。<br><br>
+备选已修好：Y73s 移植版原本 rc 里写死 <code>PD2031</code>，已改为 <code>PD2057</code>，
+并换入 Y52s 的 14 个触摸固件；新 sha256 <code>8a9d630b…</code>。
+若确认是 GUI 层问题，直接刷这个（它用的是已验证触摸正常的 12.1 基线 TWRP）。
+⚠️ 数据完好，别点 Format Data。</div>
+
 <div class="foot">唯一入口：本文件。配置 <code>device/vivo/y52s/</code>，上游对照 <code>reference/</code>，
 证据 <code>device_dump/</code>，命令刷 <code>flash/</code>，云端编译 <code>.github/workflows/</code>，
 产物取证 <code>build/inspect_ci_image.py</code>。未列出来源的参数保持 PENDING。</div>

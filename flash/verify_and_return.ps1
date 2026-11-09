@@ -62,9 +62,11 @@ if (Test-Path $local) { Write-Host "  EVIDENCE: $local" } else { Write-Warning "
 # (so a later normal power-on goes to the system, not recovery)
 Write-Host "[5/6] clearing boot-recovery BCB (32-byte command field only) ..."
 & $AdbPath -s $Serial shell "dd if=/dev/zero of=/dev/block/by-name/misc bs=32 count=1 conv=notrunc 2>/dev/null; sync" 2>&1 | Out-Null
-$bcb = (& $AdbPath -s $Serial shell "dd if=/dev/block/by-name/misc bs=32 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n'" 2>&1 | Out-String).Trim()
-if ($bcb -match '^0+$' -and $bcb.Length -gt 0) { Write-Host "  BCB cleared (all zero)" }
-else { Write-Warning "  BCB readback unexpected: $bcb" }
+$bcbHex = (& $AdbPath -s $Serial shell "dd if=/dev/block/by-name/misc bs=32 count=1 2>/dev/null | od -An -tx1" 2>&1 | Out-String)
+# od collapses duplicate lines with '*'; strip everything but hex digits.
+$bcb = ($bcbHex -replace '[^0-9a-fA-F]', '')
+if ($bcb.Length -gt 0 -and $bcb.Trim('0') -eq '') { Write-Host "  BCB cleared (all zero)" }
+else { Write-Warning "  BCB readback unexpected: $bcbHex" }
 
 # --- [6] STAY in TWRP by default --------------------------------------------
 if (-not $ReturnToSystem) {

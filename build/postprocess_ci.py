@@ -214,9 +214,52 @@ print("injected %d verbatim entries (%d bytes)" %
 # ---------------------------------------------------------------------------
 # 2) one self-contained rc, wire init.rc to it
 # ---------------------------------------------------------------------------
-LP = ("/system_root/system/lib64:/system_root/system/lib64/vndk-29:"
-      "/vendor/lib64:/vendor/lib64/hw")
+PREPARE = """#!/sbin/sh
+# y52s: wait for dynamic-partition mapper nodes (they do NOT exist at 'on init'),
+# then mount system/vendor so the FBE HAL binaries and VNDK libs are visible.
+i=0
+while [ $i -lt 30 ]; do
+    [ -e /dev/block/mapper/system ] && [ -e /dev/block/mapper/vendor ] && break
+    i=$((i+1))
+    sleep 1
+done
+mkdir -p /system_root /vendor 2>/dev/null
+mount | grep -q 'on /system_root type' || \\
+    mount -t ext4 -o ro /dev/block/mapper/system /system_root 2>/dev/null
+mount | grep -q 'on /vendor type' || \\
+    mount -t ext4 -o ro /dev/block/mapper/vendor /vendor 2>/dev/null
+exit 0
+"""
+# ramdisk /system/lib64 is always present (vendor is not), so list it FIRST.
+LP = "/system/lib64:/system_root/system/lib64:/system_root/system/lib64/vndk-29:/vendor/lib64:/vendor/lib64/hw"
+
+# Overwrite the injected v7 prepare script: it ran at "on init" when the
+# dynamic-partition mapper nodes did not exist yet, so /vendor stayed
+# unmounted and the HAL binaries were missing. Wait for the nodes instead.
+prep = ci_by["sbin/y52s_prepare.sh"]
+prep["data"] = PREPARE.encode()
+prep["fields"][1] = ("%08X" % 0o100755).encode()
+print("y52s_prepare.sh replaced with mapper-waiting version")
+
+# Measured at runtime 13:20: libkeymaster4.so needs
+# libpuresoftkeymasterdevice.so. It lives in the system vndk-29 dir, but the
+# system logical partition is not mounted early, so y52s_keymaster stayed
+# 'restarting'. Ship it in the ramdisk (/system/lib64, first in LD_LIBRARY_PATH).
+LIB_SRC = os.path.join(ROOT, "build", "libs", "libpuresoftkeymasterdevice.so")
+assert os.path.isfile(LIB_SRC), "missing " + LIB_SRC
+libname = "system/lib64/libpuresoftkeymasterdevice.so"
+if libname not in ci_by:
+    le = new_entry(libname, open(LIB_SRC, "rb").read(), 0o100644, tpl)
+    ci_ents.append(le)
+    ci_by[libname] = le
+    added.append(libname)
+    print("injected", libname)
+
 svc = v7_by["init.recovery.svc.rc"]["data"].decode("utf-8", "replace")
+
+
+OLD_LP = ("setenv LD_LIBRARY_PATH /system_root/system/lib64:"
+          "/system_root/system/lib64/vndk-29:/vendor/lib64:/vendor/lib64/hw")
 
 
 def service_block(name):
@@ -225,42 +268,45 @@ def service_block(name):
     ends = [x for x in (svc.find("\nservice ", st + 1),
                         svc.find("\non ", st + 1)) if x >= 0]
     nx = min(ends) if ends else len(svc)
-    return svc[st:nx].rstrip() + "\n"
+    blk = svc[st:nx].rstrip() + "\n"
+    if "LD_LIBRARY_PATH" in blk:
+        blk = blk.replace(OLD_LP, "setenv LD_LIBRARY_PATH " + LP)
+        assert "setenv LD_LIBRARY_PATH " + LP in blk, "LD_LIBRARY_PATH not rewritten"
+    return blk
 
 
-touch_svc = ("service touchupdate /system/bin/vts_app_recovery --update\n"
-             "    user root\n"
-             "    group root\n"
-             "    disabled\n"
-             "    seclabel u:r:recovery:s0\n")
-mtp = ("on property:sys.usb.config=mtp\n"
-       "    setprop sys.usb.config adb\n\n"
-       "on property:sys.usb.config=mtp,adb\n"
-       "    setprop sys.usb.config adb\n\n"
-       "on property:sys.usb.config=adb,mtp\n"
-       "    setprop sys.usb.config adb\n")
-
+EXEC_PREPARE = ("    exec u:r:recovery:s0 root root -- "
+                "/sbin/sh /sbin/y52s_prepare.sh\n")
 y52s_rc = (
     "# y52s: post-build device init. Every value below is copied from the\n"
     "# stock-based v7 image whose touch/USB/HAL behaviour was verified.\n"
-    "import /init.recovery.touch.rc\n\n"
-    + touch_svc + "\n"
-    + service_block("y52s_prepare") + "\n"
+    "# Touch firmware update lives in init.recovery.touch.rc, which v7's\n"
+    "# init.recovery.usb.rc imports explicitly (deterministically loaded).\n"
+    "# vivo's vts_app_recovery selects the panel firmware by\n"
+    "# ro.vivo.product.model. It is ABSENT from prop.default (measured), so\n"
+    "# without this the updater reports 'no firmware for product' and the\n"
+    "# touchscreen stays dead even though /dev/input/event3 exists.\n"
+    "# (Y73s DEVELOPMENT_LOG stage 2; verified on this device 13:25: with the\n"
+    "#  prop set, TP-FW-PD2057-LCMID17-VER0x26.bin updates successfully.)\n"
+    "on early-init\n"
+    "    setprop ro.vivo.product.model PD2057\n"
+    "    setprop ro.vendor.vivo.product.model PD2057\n\n"
     + service_block("y52s_keymaster") + "\n"
     + service_block("y52s_gatekeeper") + "\n"
     "on init\n"
     "    setprop sys.usb.configfs 1\n"          # v7, measured: device uses configfs
     "    setprop sys.usb.ffs.aio_compat 1\n"
-    "    setprop recovery.service 1\n"
-    "    exec_start y52s_prepare\n"
+    "    setprop recovery.service 1\n\n"
+    "# mapper nodes do NOT exist at on init; 'exec' is synchronous so the\n"
+    "# mounts are ready before the HAL services are started.\n"
+    "on boot\n"
+    + EXEC_PREPARE +
     "    start y52s_keymaster\n"
-    "    start y52s_gatekeeper\n"
-    "    start touchupdate\n\n"
+    "    start y52s_gatekeeper\n\n"
     "on property:twrp.modules.loaded=true\n"
-    "    exec_start y52s_prepare\n"
+    + EXEC_PREPARE +
     "    start y52s_keymaster\n"
-    "    start y52s_gatekeeper\n"
-    "    start touchupdate\n\n"
+    "    start y52s_gatekeeper\n\n"
     "# USB gadget config lives in v7's configfs init.recovery.usb.rc\n"
     "# (replaced below); it already contains the MTP interception guards.\n"
 )
@@ -271,21 +317,48 @@ ci_ents.append(e)
 ci_by[rc_name] = e
 added.append(rc_name)
 
-# init.rc already imports /init.recovery.${ro.hardware}.rc; ro.hardware is
-# "mt6853" on this device (measured in getprop), so the file we add above is
-# loaded automatically. Keep the stock line untouched for CI/local parity.
+# init.rc imports /init.recovery.${ro.hardware}.rc. Property expansion during
+# import parsing is unreliable (ro.hardware comes from androidboot.hardware
+# and may not be set yet), which is why the 13:05 image had NO touch:
+# init.recovery.mt6853.rc never loaded, so vts_app_recovery never ran.
+# Replace it with an explicit, deterministic import.
 irc = ci_by["system/etc/init/hw/init.rc"]
 t = irc["data"].decode("utf-8", "replace")
-assert "import /init.recovery.${ro.hardware}.rc" in t, "init.rc import line not found"
+old_import = "import /init.recovery.${ro.hardware}.rc"
+assert old_import in t, "init.rc import line not found"
+t = t.replace(old_import, "import /init.recovery.mt6853.rc", 1)
+irc["data"] = t.encode()
+print("init.rc: ${ro.hardware} import replaced with explicit mt6853.rc")
 
-# Also persist the same rc into the device tree so future CI builds are born
-# with touch support (TWRP merges recovery/root into the recovery ramdisk).
-dt_rc = os.path.join(ROOT, "device", "vivo", "y52s", "recovery", "root",
-                     "init.recovery.mt6853.rc")
-os.makedirs(os.path.dirname(dt_rc), exist_ok=True)
+# Touch firmware update: append to init.recovery.touch.rc, which v7's
+# init.recovery.usb.rc imports explicitly. This is the Y73s-verified form
+# (`on boot exec ... /system/bin/vts_app_recovery --update`).
+trc = ci_by["init.recovery.touch.rc"]
+tt = trc["data"].decode("utf-8", "replace")
+nl = "\r\n" if "\r\n" in tt else "\n"
+exec_block = (
+    "# y52s: load the panel touch firmware at boot (deterministic path).\n"
+    "on boot\n"
+    "    exec u:r:recovery:s0 root root -- /system/bin/vts_app_recovery --update\n"
+)
+if "vts_app_recovery" not in tt:
+    tt = tt.rstrip("\r\n") + nl + nl + exec_block.replace("\n", nl)
+    trc["data"] = tt.encode()
+print("touch.rc: vts_app_recovery --update appended (on boot)")
+
+# Persist both files into the device tree so future CI builds are born with
+# touch support (TWRP merges recovery/root into the recovery ramdisk).
+dt_root = os.path.join(ROOT, "device", "vivo", "y52s", "recovery", "root")
+os.makedirs(dt_root, exist_ok=True)
+dt_rc = os.path.join(dt_root, "init.recovery.mt6853.rc")
 open(dt_rc, "w", encoding="utf-8", newline="\n").write(y52s_rc)
 os.chmod(dt_rc, 0o750)
-print("device tree rc written:", dt_rc)
+open(os.path.join(dt_root, "init.recovery.touch.rc"), "wb").write(trc["data"])
+open(os.path.join(dt_root, "sbin", "y52s_prepare.sh"), "wb").write(PREPARE.encode())
+os.makedirs(os.path.join(dt_root, "system", "lib64"), exist_ok=True)
+open(os.path.join(dt_root, "system", "lib64",
+                  "libpuresoftkeymasterdevice.so"), "wb").write(open(LIB_SRC, "rb").read())
+print("device tree rc + touch.rc + prepare.sh + keymaster lib written")
 
 # ---------------------------------------------------------------------------
 # 3) version props -> measured Android 10 values
@@ -318,11 +391,26 @@ print("version props changed:", n)
 # could not fix it; the whole implementation must be the configfs one.
 # ---------------------------------------------------------------------------
 usb = ci_by["init.recovery.usb.rc"]
-v7_usb = v7_by["init.recovery.usb.rc"]["data"]
+v7_usb_text = v7_by["init.recovery.usb.rc"]["data"].decode("utf-8", "replace")
+# v7's usb.rc imports rc files that exist only in the stock ramdisk
+# (mt6833 / svc / platform). Comment those out so init does not stumble on
+# missing imports; keep /init.recovery.touch.rc, which we DID inject and which
+# now carries the touch-firmware exec.
+fixed_lines = []
+for line in v7_usb_text.splitlines(True):
+    s = line.strip()
+    if s.startswith("import /") and not s.startswith("#"):
+        target = s.split(None, 1)[1].lstrip("/")
+        if target not in ci_by:
+            line = "# " + line.lstrip()
+    fixed_lines.append(line)
+v7_usb = "".join(fixed_lines).encode()
 assert b"configfs" in v7_usb and b"y52s" in v7_usb, "v7 configfs usb.rc unexpected"
+assert b"import /init.recovery.touch.rc" in v7_usb, "touch.rc import lost"
 usb["data"] = v7_usb
 usb["fields"][1] = v7_by["init.recovery.usb.rc"]["fields"][1]
-print("usb.rc replaced with v7 configfs version (%d bytes)" % len(v7_usb))
+print("usb.rc replaced with v7 configfs version (%d bytes, stale imports commented)"
+      % len(v7_usb))
 
 # Persist the same USB rc into the device tree so future CI builds are born
 # with a working adb/MTP configuration.

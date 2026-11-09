@@ -184,7 +184,20 @@ for e in v7_ents:
         fw_added.append(ne["name"])
 print("touch firmware replaced with %d Y52s blobs" % len(fw_added))
 
-# --- 4) gatekeeper service path (measured: /vendor/bin/hw/...) --------------
+# --- 4b) Y73s rc files still hard-code PD2031 for the touch-firmware picker.
+# Measured on this device: ro.vivo.product.model / ro.vendor.vivo.product.model
+# are PD2057. Without this, vts_app_recovery looks for PD2031 firmware while
+# the ramdisk carries PD2057 blobs -> "no firmware for product" -> no touch.
+rc_fixed = 0
+for e in y_ents:
+    if e["name"].endswith(".rc"):
+        txt = e["data"].decode("utf-8", "replace")
+        if "PD2031" in txt:
+            e["data"] = txt.replace("PD2031", "PD2057").encode()
+            rc_fixed += 1
+print("rc files with PD2031 -> PD2057:", rc_fixed)
+
+# --- 4c) gatekeeper service path (measured: /vendor/bin/hw/...) --------------
 gk = 0
 for e in y_ents:
     if e["name"].endswith(".rc"):
