@@ -921,8 +921,9 @@ FBE 解密的根因已用二进制证据锁定为「recovery 分区缺 vivo 原�
   <tr><td>0（机主）</td><td><code>[SPBLOB] spblob v2/v3 - using direct Keymaster HIDL</code> → <code>Successfully generated disk decryption secret key</code></td><td><code>User 0 Decrypted Successfully!</code></td></tr>
   <tr><td>999（DOBULE_APP）</td><td><code>using secdis to decrypt spblob</code></td><td>失败，<code>twrp.user.999.decrypt</code> 保持 0</td></tr>
 </table>
-<p>也就是说：指定 USER ID 生效了（<code>Decrypt_User: ENTER user_id=999</code>），但 Y73s 定制的 <code>Decrypt_User_Synth_Pass</code> 对非 0 用户走了 <code>secdis</code> 路径，而这条路径在本机解不开。
-<strong>换密码、重试、改 props 都不会有用</strong>；要修必须改 <code>system/vold/Decrypt.cpp</code> 里 synthetic password 的用户处理，再重编译 12.1 源码树（需 Y73s 的完整 <code>patches/</code> 集 + 一轮云端编译）。</p>
+<p><strong>本章 16.1 的判断在第十八章被证伪，保留仅作复盘。</strong>「<code>using secdis to decrypt spblob</code>」只是非 weaver 分支的通用日志，主用户 0 同样走这条分支；真正的差异是 keystore 返回的 <code>-26 KEY_USER_NOT_AUTHENTICATED</code>。
+指定 USER ID 确实生效（<code>Decrypt_User: ENTER user_id=999</code>），失败原因是 secondary user 的 synthetic password 密钥存放在 <strong>user 0 的 keystore 命名空间</strong>，而代码用 <code>fakeUid(999)</code> 去验证 gatekeeper，得到的 auth token 携带的是 999 的 SID。
+确切证据与源码级修复见 <strong>18.5 / 18.6</strong>。</p>
 <p>在修好之前，应用分身数据仍可在系统里用 root 直接取（无需 TWRP 解密），例如把 <code>/data/user/999/</code>、<code>/data/system_ce/999/</code> 打包到电脑；
 TWRP 备份 <code>/data</code> 会缺这部分（界面有 <code>backup_storage_undecrypt_warning</code> 提示），主数据、卡刷、adb、MTP 均不受影响。</p>
 
@@ -1006,9 +1007,99 @@ MTP 服务日志 <code>E:[MTP] request read returned -1, errno: 108/19</code> �
 那会是一轮 30–60 分钟的云端构建，由我执行，不需要你碰编译。用户已明确拒绝「在系统态旁路打包分身数据」这类未经要求的替代脚本，该项不再保留。</p>
 <p>⚠️ 数据始终完好，全程未执行 <code>format/wipe</code>；别点 Format Data。</p>
 
+<h2>十八、18:20 追加 — 用户三点意见：删除越权脚本、修好 CI 缓存与同步、继续修 user 999 解密</h2>
+
+<h3>18.1 先纠正越权动作</h3>
+<div class="block">上一轮我自行落地了 <code>flash/backup_user999.sh</code>（系统态 root 打包分身数据），<strong>你没有要求这个</strong>。已删除该脚本，并从 <code>.gitignore</code>、文档表格、工作记忆里清掉全部引用。
+后续不再用「旁路备份」替代真正的解密修复。</div>
+
+<h3>18.2 ccache 0.0 / 8.0（0.00%）的确切根因</h3>
+<p>不是缓存键写错，也不是 10 GB 额度问题，而是 <strong>Android 11 构建系统根本没启用 ccache</strong>。取回 <code>TeamWin/android_build @ android-11</code> 的 <code>core/ccache.mk</code>，原文：</p>
+<pre># We no longer provide a ccache prebuilt. ...
+# So if you still want to use ccache, continue setting USE_CCACHE, but also set
+# the CCACHE_EXEC environment variable to the path to your ccache executable.
+ifneq ($(CCACHE_EXEC),)
+ifneq ($(filter-out false,$(USE_CCACHE)),)
+  CCACHE_COMPILERCHECK ?= content
+  CCACHE_SLOPPINESS := time_macros,include_file_mtime,file_macro
+  CCACHE_BASEDIR := /
+  CCACHE_CPP2 := true
+  ifndef CC_WRAPPER
+    CC_WRAPPER := $(CCACHE_EXEC)
+  endif
+  ...
+endif
+endif</pre>
+<p>原 workflow 只设了 <code>USE_CCACHE=1</code>，<code>CCACHE_EXEC</code> 为空 → 整段被跳过 → <code>CC_WRAPPER</code> 为空 → 一次编译都没经过 ccache，所以 <code>ccache -s</code> 恒为 0.0/8.0。修复：</p>
+<ul>
+  <li>新增 <code>CCACHE_EXEC=/usr/bin/ccache</code>，并把 <code>CC_WRAPPER</code> / <code>CXX_WRAPPER</code> 一并导出为环境变量（Android 11 的 C++ 大多由 soong 编译，只读环境里的 wrapper）。</li>
+  <li>按 ccache.mk 的建议设 <code>CCACHE_COMPILERCHECK=content</code>、<code>CCACHE_BASEDIR=/</code>、<code>CCACHE_SLOPPINESS</code>、<code>CCACHE_CPP2</code> —— 每次 <code>repo sync</code> 都会刷新 mtime，不设这些跨 runner 必然 miss。</li>
+  <li>新增「Configure ccache」步骤与构建步里的 <code>get_build_var CC_WRAPPER</code> 断言：wrapper 为空就直接失败，不再静默产出 0% 缓存；构建结束打印 <code>ccache -s</code>。</li>
+  <li>缓存键加入 <code>hashFiles('patches/twrp11/**')</code>；<code>actions/setup-java</code> 升到 v5，消掉一个 deprecated 警告。另一个 Node.js 20 警告是 GitHub 侧强制迁移到 Node 24，非本仓库可修。</li>
+</ul>
+
+<h3>18.3 「编译的没触摸、没和移植同步」→ 把已验证资产变成设备树的唯一来源</h3>
+<p>此前 <code>device/vivo/y52s/recovery/root/</code> 是一份过时的上游快照：触摸 <code>rc</code> 没有被 <code>init.rc</code> 导入链加载、<code>init.recovery.usb.rc</code> 里还有强行把 MTP 改回 adb 的拦截、缺全部 vendor HAL/trustlet。本次直接从<strong>真机已验证的 <code>a3855ed4…</code> 镜像 ramdisk</strong>逐字节抽出资产放进设备树（合计 4.39 MB）：</p>
+<table>
+  <tr><th>类别</th><th>内容</th></tr>
+  <tr><td>rc</td><td><code>init.recovery.mt6853.rc</code>（PD2057 属性、vts_app_recovery 触摸固件更新、mobicore / keymaster-4-0-trustonic / gatekeeper-1-0 / keystore / guardianangle 服务、configfs MTP）与 <code>init.recovery.usb.rc</code>；删除过时的 <code>init.recovery.touch.rc</code>（验证镜像里根本没有这个 import）</td></tr>
+  <tr><td>触摸</td><td>14 个 PD2057 面板固件（2.9 MB）+ <code>vts_app_recovery</code> + <code>ro.vivo.product.model=PD2057</code></td></tr>
+  <tr><td>TEE / HAL</td><td><code>mcDriverDaemon</code>、<code>keymaster@4.0-service.trustonic</code>、<code>gatekeeper@1.0-service</code>、<code>libMcGatekeeper.so</code>、12 个 <code>*.drbin</code> trustlet</td></tr>
+  <tr><td>辅助</td><td><code>resetprop</code>、<code>guardianangle</code>、<code>wait_for_keymaster</code>、<code>auto_patchlevel.sh</code>、<code>clear_bcb.sh</code>、<code>rebootrecovery.sh</code></td></tr>
+  <tr><td>MTP</td><td>把第十七章验证过的 configfs 开关动作（不依赖永远不会被置 1 的 <code>ffs.mtp.ready</code>）写进 rc，替换已证伪的 <code>ready=1 &amp;&amp; decrypt=1</code> 门控</td></tr>
+</table>
+<p>CI 的「Install the y52s device tree」步骤现在会对这些文件逐项 fail-fast，缺失即报错，不会再出现「编出来的镜像没有触摸」。</p>
+
+<h3>18.4 官方 vbmeta 进 CI：源码构建不再由 AOSP test key 毁掉解密</h3>
+<p>之前 CI 产物带 AOSP test key + <code>2099-12-31 / 16.1.0</code>，TEE 收到错的 boot_patchlevel，FBE 必然 <code>-62 KEY_REQUIRES_UPGRADE</code>。现在把官方 recovery 里那 <strong>1728 B vbmeta + 64 B footer</strong>（vivo 公钥 <code>4bdf3ccd…</code>，<code>boot.security_patch=2019-06-06</code>）单独归档到
+<code>device/vivo/y52s/avb/</code>，并新增 <code>build/ci_hybrid.py</code> 作为构建后步骤：保留编译内容逐字不变、强制 boot 头 <code>os_version=0x14000172</code>、
+只改写 <code>footer.vbmeta_offset</code>。本地用现有镜像跑通，重建结果正好是已验证的 <code>a3855ed4…</code>，逻辑等价性得到验证。</p>
+
+<h3>18.5 user 999 的决定性证据（不再靠猜）</h3>
+<p>重启回系统、用 Magisk root 做只读取证，并从历史真机日志里取出真 PIN 那次尝试的完整回显：</p>
+<pre>userlist.xml : &lt;user id="0"/&gt; &lt;user id="999"/&gt;   (UserInfo{999:DOBULE_APP:20000030})
+/data/system_de/0/spblob/    : 8b062251e4788049.{pwd,secdis,spblob} + handle
+/data/system_de/999/spblob/  : c977db9a6356c1ad.{pwd,secdis,spblob} + handle + .e0/.p1
+/data/misc/keystore/user_0/  : 1000_USRPKEY_synthetic_password_8b062251e4788049   (user 0)
+                               1000_USRPKEY_synthetic_password_c977db9a6356c1ad   (user 999 !)
+/data/misc/keystore/user_999/: 只有 99910311_*_test，没有 synthetic_password 密钥
+/data/misc/vold/user_keys/ce/999/current/ : encrypted_key / secdiscardable / stretching / version
+
+真 PIN + twrp decrypt &lt;PIN&gt; 999 的日志：
+  [DEBUG] Decrypt_User: ENTER user_id=999
+  [SPBLOB] Found key file: /data/misc/keystore/user_0/1000_USRPKEY_synthetic_password_c977db9a6356c1ad
+  [SPBLOB] Got key characteristics successfully
+  [Keymaster] begin: km_error=-26
+  failed to unwrapSyntheticPasswordBlob
+用户 0 用同一个 PIN 走同一分支 → Successfully generated disk decryption secret key</pre>
+<p><strong>结论</strong>：999 有自己的 spblob 与 CE 密钥，但它的 synthetic password 密钥存放在 <strong>user 0 的 keystore 命名空间</strong>（<code>1000_</code> 前缀），该密钥绑定的是机主的 gatekeeper SID。
+<code>Decrypt_User_Synth_Pass()</code> 用 <code>fakeUid(user_id)</code> 验证 gatekeeper，999 得到的是分身用户的 SID（两个 <code>.pwd</code> 里 58 B password handle 的 SID 分别 <code>c8db…c2bb</code> / <code>1d8a…eaf1</code>，确实不同），
+keystore 找不到匹配条目 → <code>-26 KEY_USER_NOT_AUTHENTICATED</code>。<strong>换密码、重试、改 props 都无效</strong>，第十六章说「走了不同 secdis 分支」是误判。</p>
+
+<h3>18.6 源码级修复与验证</h3>
+<p>新增 <code>patches/twrp11/0001-y52s-owner-auth-token-for-secondary-users.patch</code>，作用于 <code>bootable/recovery/crypto/fscrypt/Decrypt.cpp</code>：
+新增 <code>Write_Owner_Auth_Token(Password)</code>，用同一个 LSKF 对 <strong>user 0</strong> 的 <code>.pwd</code> 重新计算 password token、以 <code>fakeUid(0)</code> 验证 gatekeeper，把机主 auth token 写回 <code>/auth_token</code>；
+在 <code>Decrypt_User_Synth_Pass()</code> 的 secdis 分支里，仅当 <code>user_id != 0</code> 时替换 token，<code>application_id</code> 仍用 999 自己的 password token + secdiscardable，不影响密钥派生。
+已在临时 git 仓库对 <code>TeamWin/android_bootable_recovery @ android-11</code> 的原始文件验证 <code>git apply --check</code> + <code>git apply</code> 全部通过；CI 的「Apply y52s source patches」步骤也会先 check 再 apply，源码漂移会直接失败而不是悄悄编出未打补丁的二进制。</p>
+<p>对照源码已归档：<code>reference/twrp11/</code>（TWRP 11 解密相关文件）、<code>reference/twrp12/vold_Decrypt.cpp</code>、<code>reference/y73s/patches/system_vold/</code>（Y73s 的 6 个 vold 补丁）。</p>
+
+<h3>18.7 状态、已验证 / 未验证边界与下一步</h3>
+<table>
+  <tr><th>项</th><th>状态</th></tr>
+  <tr><td>越权脚本</td><td>已删除，引用已清理</td></tr>
+  <tr><td>ccache</td><td>根因锁定并修复；<code>CC_WRAPPER</code> 断言 + 构建后统计。真实命中率需等本轮编译结束看 summary</td></tr>
+  <tr><td>设备树同步</td><td>CI 前置断言全部通过（本地复刻 + 云端实际步骤均 success）</td></tr>
+  <tr><td>源码补丁</td><td>本地 <code>git apply</code> 通过，云端「Apply y52s source patches」success</td></tr>
+  <tr><td>新镜像真机验证</td><td><strong>未验证</strong>：云端构建 run <code>42604087199</code> 正在编译（约 30–60 分钟），产物尚未刷入</td></tr>
+</table>
+<p>取证时还发现：<strong>设备 recovery 分区当时并不是 <code>a3855ed4…</code>，而是你后来刷入的 CI 产物</strong>——boot 头 <code>os_version=0x16000172</code>（16.0.0 / 2099-12），正是 TEE 判定密钥过期的值，也解释了「没触摸、解不了密」。
+已用 <code>flash_recovery.ps1</code> 把 <strong>已完整验证的 <code>a3855ed4…</code></strong> 刷回，回读哈希一致、<code>/data</code> 未动；设备当前在系统态。</p>
+<p>等 run <code>42604087199</code> 出产物后，下一步是：下载 <code>y52s-twrp11-recovery</code> → 核对官方 vbmeta 与补丁标记 → 刷入 → 重启进 TWRP 输密码 → 检查 <code>twrp.user.999.decrypt</code> 与 <code>/data/user/999</code> 是否明文。
+⚠️ 数据始终完好，全程未执行 <code>format/wipe</code>；别点 Format Data。</p>
+
 <div class="foot">唯一入口：本文件。配置 <code>device/vivo/y52s/</code>，上游对照 <code>reference/</code>，
-证据 <code>device_dump/</code>，命令刷 <code>flash/</code>，云端编译 <code>.github/workflows/</code>，
-产物取证 <code>build/inspect_ci_image.py</code>。未列出来源的参数保持 PENDING。</div>
+证据 <code>device_dump/</code>，命令刷 <code>flash/</code>，源码补丁 <code>patches/twrp11/</code>，
+产物取证 <code>build/inspect_ci_image.py</code>，CI 后处理 <code>build/ci_hybrid.py</code>。未列出来源的参数保持 PENDING。</div>
 </div>
 </body>
 </html>
