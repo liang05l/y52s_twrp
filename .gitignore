@@ -39,3 +39,7 @@ build/*
 !flash/probe_hal.sh
 !flash/probe_km_tail.sh
 !flash/verify_decrypt.sh
+reference/y52s_official_recovery.img
+!build/make_official_hybrid.py
+!flash/verify_final.sh
+!flash/verify_features.sh

@@ -781,7 +781,7 @@ usb.rc 5185 B / configfs 11 处、触摸固件 14 个、AVB 仍为原厂 vivo �
 
 <div class="block"><strong>先说结论</strong>：换用 Y73s (PD2031) 移植版后，<strong>触摸、adb、MTP、亮度、卡刷界面全部可用</strong>。
 FBE 解密的根因已用二进制证据锁定为「recovery 分区缺 vivo 原厂签名的 vbmeta」，不是 props、不是 HAL、不是密码。
-最后一次尝试（把系统 vbmeta 分区接进 recovery）导致设备<strong>无法启动</strong>，当前需先按 13.4 恢复。</div>
+<strong>该结论在第十四章已被验证并解决</strong>；本章记录的是定位过程与一次失败的尝试（已恢复）。</div>
 
 <h3>13.1 已经达成的（真机实测）</h3>
 <table>
@@ -811,21 +811,72 @@ FBE 解密的根因已用二进制证据锁定为「recovery 分区缺 vivo 原�
   <li>设备侧只读取证器：<code>flash/probe_decrypt.sh</code>、<code>probe_keys.sh</code>、<code>probe_hal.sh</code>、<code>probe_km_tail.sh</code>、<code>verify_decrypt.sh</code>、<code>probe_input.sh</code>。</li>
 </ul>
 
-<h3>13.4 当前状态与恢复（必须先做）</h3>
-<div class="block"><strong>recovery 分区现在是 <code>838f8a85…</code>，这版启动不了</strong>，设备 USB 完全离线。
-需要一次物理操作：<strong>长按电源 10 秒以上强制关机，再正常开机</strong>（系统 boot 分区完好）；或按住音量上+电源进 fastboot。
-连上后我跑一条命令即可完成恢复：
+<h3>13.4 当时的临时状态（已于 14 章恢复，保留作复盘）</h3>
+<div class="block">当时 recovery 分区是启动不了的 <code>838f8a85…</code>，设备 USB 完全离线，需要一次物理强制关机再开机。
+用户随后完成该操作，设备正常回到系统；接着用官方素材做出 <code>77c350f8…</code> 并解密成功 —— <strong>见第十四章</strong>。
+下面这条恢复脚本现在<strong>无需执行</strong>，仅作为回退手段保留：
 <pre>powershell -ExecutionPolicy Bypass -File .\flash\recover.ps1</pre>
 它会自动清掉 <code>boot-recovery</code> BCB（否则开机又进 rec）、用命令刷把<strong>触摸已验证可用</strong>的
 <code>0fda91ff…</code>（备份 <code>build/recovery_touch_ok.img</code>）写回 recovery，并核对分区哈希。
 脚本内含 fastboot 自动 reboot 与 240 秒等待；全程不写 <code>/data</code>。</div>
 
-<h3>13.5 要继续解密，需要你补的资料</h3>
-<ol>
-  <li><strong>Y52s / PD2057 官方原厂固件包或官方 recovery.img</strong>（当前系统版本 <code>PD2057_A_1.16.4</code> 最佳）。只要有它，就能取出 vivo 签名的 vbmeta 与真实 <code>boot.security_patch</code>，按 Y73s 的 <code>make_hybrid.py</code> 规则做混合镜像 —— 这一步由我完成。</li>
-  <li>锁屏密码类型（PIN / 图案 / 密码 / 仅滑动）。DE 密钥修好后，CE 密钥仍需锁屏密码派生，届时 TWRP 会弹密码框，输密码是屏幕操作。</li>
-</ol>
+<h3>13.5 当时列出的待补资料（已于 16:19 全部补齐）</h3>
+<p>① 官方原厂 recovery/固件包 —— 用户已提供 <code>recovery.bin</code>（PD2057_A_1.16.4）；
+② 锁屏密码 —— 用户已在 TWRP 输入，<code>User 0 Decrypted Successfully</code>。详见第十四章。</p>
 <p>⚠️ 任何情况下都不要点 <strong>Format Data / Wipe Data</strong>。数据始终完好。</p>
+
+<h2>十四、16:30 最终完成 — 官方 vbmeta 混合镜像，FBE 解密成功</h2>
+
+<div class="block"><strong>第十三章的阻塞已解除</strong>：你提供了官方 <code>recovery.bin</code>（PD2057_A_1.16.4），
+设备也已正常回到系统。用官方签名做混合镜像后，<code>km_error</code> 从 <code>-62</code> 变为 <code>0</code>，
+你在 TWRP 输入锁屏密码后日志输出 <code>User 0 Decrypted Successfully!</code>，<code>/data/media/0</code> 恢复为 96 个正常目录。
+适配目标全部达成。</div>
+
+<h3>14.1 官方素材取证（用户提供的 recovery.bin）</h3>
+<table>
+  <tr><th>项</th><th>实测值</th></tr>
+  <tr><td>文件 / 大小</td><td><code>C:\Users\30345\Desktop\新建文件夹 (2)\recovery.bin</code>，100663296 B，sha256 <code>83854ede…</code>；已归档为 <code>reference/y52s_official_recovery.img</code></td></tr>
+  <tr><td>boot 头</td><td>v2 / page 2048 / header_size 1660 / <code>os_version=0x14000172</code>（10.0.0 / 2023-02）；cmdline <code>product.version=PD2057_A_1.16.4</code></td></tr>
+  <tr><td>AVB footer</td><td><code>AVBf</code>，<code>original_image_size=47024128</code>，<code>vbmeta_offset=0x2cd9000</code>，<code>vbmeta_size=1728</code></td></tr>
+  <tr><td>公钥</td><td><code>4bdf3ccd984613cd…</code> — <strong>与系统 vbmeta 分区完全一致</strong>，avbtool 1.1.0，vivo 原厂签名</td></tr>
+  <tr><td>vbmeta descriptors</td><td><code>boot.security_patch=2019-06-06</code>（TEE 收到的 boot_patchlevel，与 Y73s 作者记录一致）、<code>system=2023-02-01</code>、<code>vendor=2020-07-05</code></td></tr>
+</table>
+<p>对照：此前所有镜像的内嵌 vbmeta 公钥都是 <code>7728e30f…</code>（AOSP test key），descriptor 是 <code>2099-12-31 / 16.1.0</code>。
+这正是 <code>KEY_REQUIRES_UPGRADE (-62)</code> 的根因。</p>
+
+<h3>14.2 混合镜像构造规则（<code>build/make_official_hybrid.py</code>）</h3>
+<ul>
+  <li>以 <code>build/recovery_y73s_port.img</code>（<code>1d890f45…</code>，含触摸链、显式 init.rc import、gatekeeper 路径修正、实测 os_version）的<strong>内容逐字保留</strong>：kernel / ramdisk / dtb / header。</li>
+  <li>取官方 vbmeta <strong>1728 B 原样</strong>与官方 footer <strong>64 B 原样</strong>；<strong>只重写 <code>footer.vbmeta_offset=0x37a4800</code></strong>，<code>original_image_size</code> 保持官方 47024128，<code>vbmeta_size</code> 保持 1728。</li>
+  <li>不修改任何 vbmeta 字节（否则破坏 vivo 签名）；不重签名、不臆造密钥。依据 Y73s 开发日志 6.5：vivo LK 只校验公钥、不校验 hash。</li>
+  <li>产物 <code>build/recovery.img</code> = <strong><code>77c350f8…</code></strong>（100663296 B），另存 <code>build/recovery_final.img</code>。离线校验：内容与输入逐字相同、官方 vbmeta 逐字相同、<code>2099-12-31</code> 与 test key 均已消失。</li>
+</ul>
+
+<h3>14.3 真机验证结果（全部实测）</h3>
+<table>
+  <tr><th>项</th><th>结果</th></tr>
+  <tr><td>刷入</td><td>从系统 Magisk root 命令刷，16.9 s，分区回读 sha256 <code>77c350f8…</code> 一致；只写 recovery，未碰 <code>/data</code></td></tr>
+  <tr><td>启动</td><td><code>adb reboot recovery</code>（系统态）→ TWRP 自动上线；BCB 开机前实测全 0，正常开机不会误进 rec</td></tr>
+  <tr><td>DE 密钥</td><td><code>km_error=0</code>（此前 -62）；<code>/data/system/locksettings.db</code>、<code>users</code>、<code>/data/misc/vold/user_keys/{ce,de}</code> 全部明文可见</td></tr>
+  <tr><td>CE 密钥</td><td>输入锁屏密码后 SPBLOB 经 Direct Keymaster HIDL 解包：<code>Successfully generated disk decryption secret key</code> → <code>User 0 Decrypted Successfully!</code>；<code>Is_Encrypted Is_Decrypted</code> 同时置位</td></tr>
+  <tr><td>数据视图</td><td><code>/data/media/0</code> 96 个正常目录（DCIM、Download、Documents、Android、…），不再是乱码名；f2fs 读写挂载</td></tr>
+  <tr><td>触摸</td><td>用户确认可用；<code>/dev/input/event3 = vivo_ts</code></td></tr>
+  <tr><td>卡刷</td><td><code>unzip</code>、<code>zipinfo</code>、<code>libziparchive.so</code>、<code>/system/etc/security/otacerts.zip</code>、<code>/res/images</code> 齐备，日志有 <code>Set page: 'install'</code>；内置存储已解密，可直接选 zip</td></tr>
+  <tr><td>亮度 / adb</td><td><code>/sys/class/leds/lcd-backlight/brightness</code> 可读写；<code>sys.usb.config=adb</code>、<code>configfs=1</code>，adb 稳定</td></tr>
+</table>
+<p>仅有两处非阻塞边界：<code>user 999</code>（系统辅助用户）解 synthetic password 报 <code>km_error=-26</code>，主用户 0 不受影响；
+当前 USB 模式是 <code>adb</code> 而非 <code>mtp,adb</code>（这是之前为防止 MTP 抢掉 adb 而设的默认值），如需电脑直接可见存储，
+在 TWRP 的 Mount 菜单里手动开启 MTP 即可，或用 <code>adb push</code> 传 zip。</p>
+
+<h3>14.4 最终产物与回退</h3>
+<ul>
+  <li>当前 recovery 分区 = <code>build/recovery.img</code> / <code>build/recovery_final.img</code>（<code>77c350f8…</code>）—— <strong>推荐使用</strong>。</li>
+  <li>触摸可用但未解密的上一版：<code>build/recovery_touch_ok.img</code>（<code>0fda91ff…</code>）。</li>
+  <li>稳定旧版 v7：<code>build/recovery_v7.img</code>（<code>0c60a727…</code>）。一键回退：<code>flash_recovery.ps1 -Image &lt;镜像路径&gt;</code>。</li>
+  <li>一键恢复脚本 <code>flash/recover.ps1</code> 仍保留（清 BCB + 刷回触摸版），现在无需使用。</li>
+  <li>设备取证脚本：<code>flash/verify_final.sh</code>、<code>verify_features.sh</code>、<code>verify_decrypt.sh</code> 及 <code>probe_*.sh</code> 系列。</li>
+</ul>
+<p>⚠️ 数据始终完好，全程未执行 <code>format/wipe</code>；如后续在 TWRP 里看到「格式化 Data」提示，<strong>不要点</strong>。</p>
 
 <div class="foot">唯一入口：本文件。配置 <code>device/vivo/y52s/</code>，上游对照 <code>reference/</code>，
 证据 <code>device_dump/</code>，命令刷 <code>flash/</code>，云端编译 <code>.github/workflows/</code>，
