@@ -67,3 +67,7 @@ flash/probe_u999_system.sh
 !patches/bootable_recovery_12.1/
 !patches/bootable_recovery_12.1/*.patch
 !reference/y73s/patches/
+!flash/verify_u999_final.sh
+!flash/probe_postboot.sh
+!build/ci12/
+!build/ci12/recovery.img.sha256

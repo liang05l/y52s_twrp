@@ -1152,6 +1152,21 @@ clang-12: error: linker command failed with exit code 1</pre>
 <p>顺带复核了 0007 的正确性：profile 的 auth token 在 gatekeeper 回调（1193 行）写入 <code>/auth_token</code>，0007 在 1212 行之后覆盖，<code>unwrapSyntheticPasswordBlob</code> 到 1228 行才读，<strong>覆盖不会被冲掉</strong>；传入的 <code>auth_token_len</code> 仅作 <code>&gt;0</code> 判断，实际解析用文件真实长度，机主 token 同为 69 字节 <code>hw_auth_token_t</code>，无需改动补丁。</p>
 <div class="block">提交 <code>4ad9c37</code> → <strong>run <code>42634563187</code></strong> 已触发。ccache 热缓存（上一轮已保存），仍需一次完整 <code>repo sync</code>。这是 12.1 线的最后一次构建：成功后下载 → 离线校验 → 刷入 → 真机验 <code>twrp.user.999.decrypt</code>。</div>
 
+<h3>18.11 构建成功 + 真机首轮验收：DE 密钥链已打通，待输 PIN 验 user 999</h3>
+<p>run <code>42634563187</code> 于 14:52 UTC <strong>completed success</strong>（约 27 分钟，比首轮快 20 分钟）。产物 <code>y52s-twrp121-recovery</code> / <code>build/ci12/recovery.img</code>，SHA256 <strong><code>b546ccc8…</code></strong>，96 MiB。</p>
+<p><strong>离线校验全绿</strong>：boot 头 <code>os_version=0x14000172</code>（Android 10 / 2023-02）；官方 vivo vbmeta 1728 B 逐字保留（公钥 <code>4bdf3ccd…</code>、<code>boot.security_patch=2019-06-06</code>，仅 <code>vbmeta_offset=0x37b2000</code> 重写）；ramdisk 3696 条目含 14 个 PD2057 触摸固件、41 个 trustlet、vts_app_recovery、trustonic keymaster HAL、<code>system/lib64/android.hardware.keymaster@4.0.so</code> 与 <code>@3.0.so</code>、configfs MTP 开关、6 处 <code>setenv LD_LIBRARY_PATH</code>；<code>y52s: owner auth token written</code> / <code>owner token unavailable</code> / <code>Direct Keymaster HIDL</code> 三个字符串确实编译进 <code>system/bin/recovery</code>。</p>
+<p><strong>真机验收</strong>（系统态命令刷 8.1 秒、回读哈希一致 → <code>adb reboot recovery</code>）：</p>
+<table>
+  <tr><th>项</th><th>实测</th></tr>
+  <tr><td>分区</td><td><code>b546ccc8…</code> 与本地产物一致，<code>/data</code> 未动</td></tr>
+  <tr><td><strong>DE 密钥</strong></td><td><code>installKeyLegacy: adding key ref=fscrypt:988027888935833c</code> 与 <code>fscrypt:6b6a5f0bcffaaac5</code> 两次成功、<code>fscryptKeyring: found existing keyring</code>、<code>keymaster_ver=4.x</code>、<code>km_error=0</code> —— 12.1 线没有 11 线的 <code>fscrypt_initialize_systemwide_keys returned fail</code></td></tr>
+  <tr><td>密码页</td><td><code>Loading page decrypt_pin</code>、<code>I:Is encrypted, do decrypt page first</code>、<code>Set page: 'decrypt'</code> 均出现，等待锁屏 PIN</td></tr>
+  <tr><td>触摸 / USB / MTP</td><td><code>vivo_ts</code> 在、<code>sys.usb.config=adb</code>、<code>tw_mtp_enabled=0</code>（解密前不会枚举密文文件名）</td></tr>
+  <tr><td>HAL</td><td>gatekeeper-1-0 / mobicore <code>running</code>；<code>init.svc.keystore=restarting</code> 与已验证镜像一致，Y73s 补丁走 <code>keystore_auth</code> + 直连 Keymaster HIDL，不依赖该服务</td></tr>
+</table>
+<p><strong>唯一未验证项</strong>：<code>twrp.user.999.decrypt</code>。FBE 的 CE 密钥必须由锁屏 PIN 派生，密码不经过我，所以需要<strong>你在 TWRP 屏幕上输一次锁屏 PIN</strong>。输入后 TWRP 会依次尝试用户 0 与 999，0007 会对 999 改用机主 auth token。输完告诉我，我读 <code>twrp.user.999.decrypt</code>、<code>y52s: owner auth token written</code> 与 <code>/data/user/999</code> 是否明文即可定论。</p>
+<div class="block">回退镜像始终是 <code>build/recovery.img</code>（<code>a3855ed4…</code>，已完整验证）。新镜像验收未通过之前不要删它。全程未执行 format / wipe，数据完好。</div>
+
 <div class="foot">唯一入口：本文件。配置 <code>device/vivo/y52s/</code>，上游对照 <code>reference/</code>，
 证据 <code>device_dump/</code>，命令刷 <code>flash/</code>，TWRP 11 补丁 <code>patches/twrp11/</code>（存档），
 12.1 解密补丁 <code>patches/system_vold/</code>，CI 流水线 <code>build/{prepare_ci12_tree.py,apply_ci12_patches.sh,postprocess_ci12.py}</code>。未列出来源的参数保持 PENDING。</div>
