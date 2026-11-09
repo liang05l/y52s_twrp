@@ -1201,6 +1201,23 @@ clang-12: error: linker command failed with exit code 1</pre>
 </ul>
 <div class="block"><strong>唯一剩下一步</strong>：在 TWRP 屏幕上输锁屏 PIN。TWRP 会先解主用户 0（把机主 token 写入 <code>/auth_token</code>），再自动对 999 试 PIN 与默认密码 <code>"!"</code>；新补丁会在第二次尝试时把机主 token 交给 keymaster。输完告诉我，我读 <code>twrp.user.999.decrypt</code>、<code>y52s: reusing owner auth token (69 bytes) for user 999</code> 与 <code>/data/user/999</code> 明文情况给出定论。回退 <code>build/recovery.img</code>（<code>a3855ed4…</code>）始终保留；全程未 format / wipe。</div>
 
+<h3>18.14 决定性收敛：999 的 SP key 绑定自己的 SID，机主 token 无效</h3>
+<p>输 PIN 后补丁<strong>确实执行了</strong>，但 999 仍失败。完整链路（<code>/tmp/recovery.log</code> 2212–2222 行）：</p>
+<pre>y52s: reusing owner auth token (69 bytes) for user 999
+[SPBLOB] Found key file: .../user_0/1000_USRPKEY_synthetic_password_c977db9a6356c1ad
+[SPBLOB] Read auth_token file, size=69
+[SPBLOB] Parsed auth token: challenge=0, userId=13529519778211224520, ...
+[SPBLOB] Using begin() with auth token
+[Keymaster] begin (authToken): Purpose=1, keySize=224, paramsCount=6
+[Keymaster] begin callback: error=-26, handle=0
+[Keymaster] begin: FAILED with error=-26
+failed to unwrapSyntheticPasswordBlob</pre>
+<p>也就是说：新补丁把 <code>km_error=-26</code> 之前缺的 auth token 补上了，unwrap 也走了 <code>begin(authToken)</code> 分支，<strong>但 -26 依旧</strong>。这否定了 18.10 的假设 —— 机主 SID <strong>不是</strong> 999 的 SP key 所绑定的 SID；key 文件虽然在 <code>user_0</code> keystore 命名空间，认证要求的却是 <strong>999 自己的 gatekeeper SID</strong>。要生成那个 token，必须让 <code>verify(fakeUid(999), 999 的 .pwd handle, …)</code> 成功，而日志里它始终是 <code>ret=-1</code>。</p>
+<p><strong>999 的真实身份</strong>（设备侧只读取证）：<code>/data/system/users/999.xml</code> 是 <code>&lt;user id="999" ... flags="536870960" profileGroupId="0"&gt;&lt;name&gt;DOBULE_APP&lt;/name&gt;</code>；<code>/data/system_de/999/</code> 只有 <code>spblob/</code>、<code>spblob_bak/</code>、<code>spblob_hash/</code> 与 <code>accounts_de.db</code>，<strong>没有 locksettings.db</strong>（无独立锁屏设置）。spblob 里除完整 <code>.pwd/.secdis/.spblob/.handle</code> 外，还有 <code>0000000000000000.e0</code>(60 B) / <code>.p1</code>(32 B)。</p>
+<p>AOSP Android 10 <code>SyntheticPasswordManager.java</code>（<code>reference/aosp10/</code>）里 <code>SP_E0_NAME="e0"</code> / <code>SP_P1_NAME="p1"</code> 属于 <strong>escrow token</strong> 机制：<code>P0/P1</code> 随机生成、<code>syntheticPassword = hash(P0||P1)</code>、<code>E0 = P0 encrypted under syntheticPassword</code>，由 <code>unwrapTokenBasedSyntheticPassword()</code> 解包。TWRP 与 Y73s 补丁只实现了 <strong>password-based</strong> SP 解包，完全没有这条 escrow 路径 —— 这不是再挪一次 hook 或换一个 auth token 能修的。</p>
+<p>最后做了一次零成本验证（无需重编译、不涉及你的 PIN）：<code>twrp decrypt default_password 999</code> → <code>用户 999 解密失败</code>，且最后一次 gatekeeper 返回 <code>ret=30000</code>（TEE 防爆破限速 30 s）。机主 PIN、TWRP 的 <code>"!"</code>、AOSP 标准 <code>default_password</code> 三种 credential 全部对不上 999 的 <code>.pwd</code> —— 999 的 LSKF 是系统创建分身时生成的、由 escrow 保护的值，用户并不知道。</p>
+<div class="block"><strong>现状</strong>：主用户 0 <code>Decrypted Successfully</code>、<code>/data/media/0</code> 96 个正常目录、触摸 / adb / 卡刷 / 亮度正常，MTP 手动开启后 <code>sys.usb.config=mtp,adb</code> 且 adb 未掉线；<code>/data</code> 全程未 format / wipe。当前分区 <code>5a4ac1ce…</code>（新补丁对 999 无效但对用户 0 无副作用），回退 <code>a3855ed4…</code> 完整保留。<br><strong>要继续修 999</strong>，需要把 AOSP <code>unwrapTokenBasedSyntheticPassword()</code> + <code>SyntheticPasswordCrypto.decrypt()</code> 的 escrow 解包移植进 <code>Decrypt.cpp</code>，再走一轮源码构建与真机验证；这是一段新逻辑，不是参数调整，且不能保证一次成功。</div>
+
 <div class="foot">唯一入口：本文件。配置 <code>device/vivo/y52s/</code>，上游对照 <code>reference/</code>，
 证据 <code>device_dump/</code>，命令刷 <code>flash/</code>，TWRP 11 补丁 <code>patches/twrp11/</code>（存档），
 12.1 解密补丁 <code>patches/system_vold/</code>，CI 流水线 <code>build/{prepare_ci12_tree.py,apply_ci12_patches.sh,postprocess_ci12.py}</code>。未列出来源的参数保持 PENDING。</div>

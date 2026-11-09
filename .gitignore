@@ -78,3 +78,8 @@ build/ci12/*.img
 !build/ci12fix/
 build/ci12fix/*.img
 !build/ci12fix/recovery.img.sha256
+!reference/aosp10/
+!reference/aosp10/*.java
+!flash/probe_u999_keymaster_tail.sh
+!flash/probe_u999_credential.sh
+!flash/try_default_999.sh
