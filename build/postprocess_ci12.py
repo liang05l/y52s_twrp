@@ -200,6 +200,31 @@ def main():
                 added += 1
     print("Y52s ramdisk assets: replaced=%d added=%d" % (replaced, added))
 
+    # --- 4b) Keymaster 4.0 HIDL runtime libraries ---------------------------
+    # The Android.mk patch adds android.hardware.keymaster@4.0 to
+    # LOCAL_SHARED_LIBRARIES, so the build normally installs its freshly
+    # compiled .so (+ DT_NEEDED deps) into the ramdisk. Keep those compiled
+    # versions; only if a build variant omits one, fall back to the exact
+    # libraries measured in the verified a3855ed4 image. The fallback files
+    # live in prebuilt/libs (NOT recovery/root) so step 4 can never overwrite
+    # a freshly compiled .so with an older one.
+    libs = os.path.join(v52, "prebuilt/libs")
+    for lib in ("android.hardware.keymaster@4.0.so",
+                "android.hardware.keymaster@3.0.so",
+                "libhidltransport.so", "libhwbinder.so", "libhidlbase.so"):
+        name = "system/lib64/" + lib
+        if name in by:
+            continue
+        src = os.path.join(libs, lib)
+        if not os.path.isfile(src):
+            continue
+        e = new_entry(name, open(src, "rb").read(), 0o100644, tpl)
+        ents.append(e)
+        by[name] = e
+        print("  runtime lib fallback: %s" % name)
+    assert "system/lib64/android.hardware.keymaster@4.0.so" in by, \
+        "keymaster@4.0.so missing from ramdisk -- link patch did not take effect"
+
     # --- 5) verified MTP configfs actions ----------------------------------
     mrc = by.get("init.recovery.mt6853.rc")
     assert mrc is not None, "init.recovery.mt6853.rc missing from ramdisk"

@@ -216,7 +216,9 @@ jobs:
           assert b'Write_Owner_Auth_Token' in d or b'y52s: owner auth token written' in d, \
               'user999 patch marker missing from ramdisk'
           assert b'PD2057' in d, 'PD2057 props missing'
-          print('user999 patch marker + PD2057 props present')
+          assert b'android.hardware.keymaster@4.0.so' in d, \
+              'keymaster 4.0 HIDL runtime lib missing from ramdisk'
+          print('user999 patch marker + PD2057 props + keymaster@4.0 runtime lib present')
           print('SHA256', hashlib.sha256(b).hexdigest())
           PY
 
@@ -237,7 +239,7 @@ jobs:
         run: |
           echo "### y52s TWRP 12.1 (Y73s tree)" >> "$GITHUB_STEP_SUMMARY"
           echo "- manifest: \`$BRANCH\` / lunch: \`$LUNCH_TARGET\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- patches: 0002/0003/0004/0006 + 0007 (user999) + MTP default off" >> "$GITHUB_STEP_SUMMARY"
+          echo "- patches: 0002/0003/0004/0006 + 0007 (user999) + MTP default off + keymaster HIDL link" >> "$GITHUB_STEP_SUMMARY"
           echo "- Y52s kernel/dtb, PD2057 touch firmware, official vivo vbmeta" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           ccache -s >> "$GITHUB_STEP_SUMMARY" 2>&1 || true

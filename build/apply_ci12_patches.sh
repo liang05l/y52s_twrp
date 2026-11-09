@@ -26,6 +26,7 @@ WORK="${TWRP_WORK:?TWRP_WORK required}"
 VD="$REPO/reference/y73s/patches/system_vold"
 P7="$REPO/patches/system_vold/0007-y52s-owner-auth-token-for-secondary-users.patch"
 MTP="$REPO/patches/bootable_recovery_12.1/0001-y52s-mtp-default-off.patch"
+LINK="$REPO/patches/bootable_recovery_12.1/0002-y52s-keymaster-hidl-link.patch"
 
 fail() { echo "::error::$*" >&2; exit 1; }
 
@@ -66,6 +67,18 @@ git apply "$MTP"         || fail "MTP patch apply failed"
 grep -q 'mPersist.SetValue("tw_mtp_enabled", "0")' data.cpp \
   || fail "MTP default marker missing"
 echo "  MTP default off OK"
+
+# Y73s 0006 turns Keymaster.cpp into a direct Keymaster 4.0 HIDL client.
+# Upstream TWRP 12.1 links KeyMint/keystore2 instead, so without this patch the
+# final recovery link fails with an undefined IKeymasterDevice::getService().
+echo "=== bootable/recovery (Keymaster 4.0 HIDL link) ==="
+git apply --check "$LINK" || fail "keymaster link patch does not apply"
+git apply "$LINK"         || fail "keymaster link patch apply failed"
+grep -q 'LOCAL_SHARED_LIBRARIES += android.hardware.keymaster@4.0' Android.mk \
+  || fail "keymaster link marker missing"
+grep -q 'TWRP_REQUIRED_MODULES += android.hardware.keymaster@4.0' Android.mk \
+  || fail "keymaster ramdisk-module marker missing"
+echo "  keymaster 4.0 HIDL link OK"
 
 echo "=== .rej / .orig sweep ==="
 find "$WORK/system/vold" "$WORK/bootable/recovery" -maxdepth 3 \

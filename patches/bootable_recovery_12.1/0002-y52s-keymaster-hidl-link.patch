@@ -1,0 +1,28 @@
+--- a/Android.mk
++++ b/Android.mk
+@@ -353,6 +353,16 @@
+         libkeystoreinfo.recovery \
+         libgatekeeper_aidl
+ 
++    # y52s / Y73s 0006 replaces Keymaster.cpp with a direct Keymaster 4.0 HIDL
++    # client. Upstream TWRP 12.1 has moved to KeyMint/keystore2 and no longer
++    # links the HIDL interface lib, so the recovery link fails with:
++    #   undefined symbol: android::hardware::keymaster::V4_0::
++    #                     IKeymasterDevice::getService(const std::string&, bool)
++    # The verified Y73s-built image DOES contain
++    # system/lib64/android.hardware.keymaster@4.0.so, so this is exactly the
++    # missing dependency. Keep it in LOCAL_SHARED_LIBRARIES (link) and in
++    # TWRP_REQUIRED_MODULES (so the .so is installed into the ramdisk).
++    LOCAL_SHARED_LIBRARIES += android.hardware.keymaster@4.0
+     LOCAL_STATIC_LIBRARIES += libkeymint_support
+ 
+     LOCAL_CFLAGS += -DTW_INCLUDE_FBE_METADATA_DECRYPT
+@@ -562,6 +572,8 @@
+     keystore2.rc \
+     plat_keystore2_key_contexts
+ 
++    TWRP_REQUIRED_MODULES += android.hardware.keymaster@4.0
++
+     ifneq ($(TW_INCLUDE_CRYPTO_FBE),)
+     TWRP_REQUIRED_MODULES += \
+         plat_service_contexts \
