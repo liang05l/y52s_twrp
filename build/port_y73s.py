@@ -216,28 +216,47 @@ assert old_import in it, "Y73s init.rc import line not found"
 irc["data"] = it.replace(old_import, "import /init.recovery.mt6853.rc", 1).encode()
 print("init.rc: ${ro.hardware} import replaced with explicit mt6853.rc")
 
-# --- 4b2) adb+MTP composite, gated on /data being decrypted -----------------
-# Trigger only when BOTH ffs.mtp.ready=1 (the user enabled MTP in the GUI)
-# AND twrp.user.0.decrypt=1. Combined with tw_mtp_enabled=0 in
-# /cache/recovery/.twrps, a fresh boot is adb-only, so the MTP server cannot
-# enumerate /data/media before the password is entered (that was the cause of
-# garbled filenames on the PC). When MTP is switched off, go back to adb.
+# --- 4b2) complete configfs switch for the MTP GUI toggle -------------------
+# TWRP 12.1 Enable_MTP() sets sys.usb.config=mtp,adb (Disable_MTP() sets adb),
+# but the Y73s configfs action ALSO requires sys.usb.ffs.mtp.ready=1 -- a
+# property that is only ever CLEARED (by Disable_MTP) on this device, never
+# set. Result: the GUI toggle only re-enumerates USB ("a beep") while f1 stays
+# unlinked from ffs.mtp. Verified from the actual 12.1 source in
+# reference/twrp12/partitionmanager.cpp and from the device log.
+#
+# Add our own actions that do the full configfs switch without that condition.
+# The OFF action is gated on ffs.mtp.ready=0 (set as the FIRST step of
+# Disable_MTP) so it does not fire at boot, where that property is empty.
 mrc = by["init.recovery.mt6853.rc"]
 mt = mrc["data"].decode("utf-8", "replace")
 assert "on property:sys.usb.config=mtp,adb" in mt, \
-    "configfs mtp,adb action missing - would not be safe to enable"
-if "y52s: MTP only after decrypt" not in mt:
+    "upstream configfs mtp,adb action missing"
+if "y52s: configfs MTP switch" not in mt:
     nl = "\r\n" if "\r\n" in mt else "\n"
     block = (
-        "# y52s: MTP only after decrypt\n"
-        "on property:sys.usb.ffs.mtp.ready=1 && property:twrp.user.0.decrypt=1\n"
-        "    setprop sys.usb.config mtp,adb\n"
+        "# y52s: configfs MTP switch (ffs.mtp.ready is never set here)\n"
+        "on property:sys.usb.config=mtp,adb && property:sys.usb.configfs=1 && property:sys.usb.ffs.ready=1\n"
+        "    write /config/usb_gadget/g1/UDC \"\"\n"
+        "    rm /config/usb_gadget/g1/configs/b.1/f1\n"
+        "    rm /config/usb_gadget/g1/configs/b.1/f2\n"
+        "    write /config/usb_gadget/g1/idProduct 0x4ee2\n"
+        "    symlink /config/usb_gadget/g1/functions/ffs.mtp /config/usb_gadget/g1/configs/b.1/f1\n"
+        "    symlink /config/usb_gadget/g1/functions/ffs.adb /config/usb_gadget/g1/configs/b.1/f2\n"
+        "    write /config/usb_gadget/g1/UDC ${sys.usb.controller}\n"
+        "    setprop sys.usb.state ${sys.usb.config}\n"
         "\n"
-        "on property:sys.usb.ffs.mtp.ready=0\n"
+        "on property:sys.usb.ffs.mtp.ready=0 && property:sys.usb.configfs=1\n"
+        "    write /config/usb_gadget/g1/UDC \"\"\n"
+        "    rm /config/usb_gadget/g1/configs/b.1/f1\n"
+        "    rm /config/usb_gadget/g1/configs/b.1/f2\n"
+        "    write /config/usb_gadget/g1/idProduct 0xd001\n"
+        "    symlink /config/usb_gadget/g1/functions/ffs.adb /config/usb_gadget/g1/configs/b.1/f1\n"
+        "    write /config/usb_gadget/g1/UDC ${sys.usb.controller}\n"
         "    setprop sys.usb.config adb\n"
+        "    setprop sys.usb.state adb\n"
     ).replace("\n", nl)
     mrc["data"] = (mt.rstrip("\r\n") + nl + block).encode()
-    print("mt6853.rc: gated mtp,adb on decrypt=1; ready=0 returns to adb")
+    print("mt6853.rc: full configfs MTP on/off actions added")
 
 # --- 4c) Y73s rc files still hard-code PD2031 for the touch-firmware picker.
 # Measured on this device: ro.vivo.product.model / ro.vendor.vivo.product.model
