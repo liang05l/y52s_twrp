@@ -1218,6 +1218,23 @@ failed to unwrapSyntheticPasswordBlob</pre>
 <p>最后做了一次零成本验证（无需重编译、不涉及你的 PIN）：<code>twrp decrypt default_password 999</code> → <code>用户 999 解密失败</code>，且最后一次 gatekeeper 返回 <code>ret=30000</code>（TEE 防爆破限速 30 s）。机主 PIN、TWRP 的 <code>"!"</code>、AOSP 标准 <code>default_password</code> 三种 credential 全部对不上 999 的 <code>.pwd</code> —— 999 的 LSKF 是系统创建分身时生成的、由 escrow 保护的值，用户并不知道。</p>
 <div class="block"><strong>现状</strong>：主用户 0 <code>Decrypted Successfully</code>、<code>/data/media/0</code> 96 个正常目录、触摸 / adb / 卡刷 / 亮度正常，MTP 手动开启后 <code>sys.usb.config=mtp,adb</code> 且 adb 未掉线；<code>/data</code> 全程未 format / wipe。当前分区 <code>5a4ac1ce…</code>（新补丁对 999 无效但对用户 0 无副作用），回退 <code>a3855ed4…</code> 完整保留。<br><strong>要继续修 999</strong>，需要把 AOSP <code>unwrapTokenBasedSyntheticPassword()</code> + <code>SyntheticPasswordCrypto.decrypt()</code> 的 escrow 解包移植进 <code>Decrypt.cpp</code>，再走一轮源码构建与真机验证；这是一段新逻辑，不是参数调整，且不能保证一次成功。</div>
 
+<h3>18.15 「继续」：对照 AOSP Android 10 源码找到 TWRP 的两处实现缺陷</h3>
+<p>拉回 <code>aosp-mirror/platform_frameworks_base@android-10.0.0_r1</code> 的 <code>SyntheticPasswordManager.java</code> / <code>SyntheticPasswordCrypto.java</code>（存 <code>reference/aosp10/</code>），逐行对照后发现 18.14 里「必须移植 escrow」的判断<strong>也不准确</strong>：<code>e0/p1</code> 是 <code>AuthenticationToken</code> 的 escrow-token 拆分（<code>P0/P1</code> 随机、<code>SP=hash(P0||P1)</code>、<code>E0=enc(P0)</code>），需要外部持有的 escrow token 才能用；999 的 <code>.spblob</code> 仍是 <strong>password-based</strong> 的 keymaster blob。真正的差异在两处源码级实现：</p>
+<table>
+  <tr><th>AOSP Android 10</th><th>TWRP / Y73s <code>Decrypt.cpp</code></th></tr>
+  <tr><td><code>DEFAULT_PASSWORD = "default-password"</code>（16 B）；<code>computePasswordToken(credential, pwd) = scrypt(credential, pwd.salt, 1&lt;&lt;N, 1&lt;&lt;R, 1&lt;&lt;P, 32)</code></td><td><code>"!"</code> 分支直接 <code>memcpy(password_token, "default-password", 16)</code> —— 32 字节 token 的<strong>后 16 字节是未初始化栈值</strong>，且完全跳过 <code>Get_Password_Data()</code>；于是 <code>application_id</code> 错、没有 gatekeeper handle</td></tr>
+  <tr><td><code>unwrapPasswordBasedSyntheticPassword()</code> 里 <code>gatekeeper.verifyChallenge(fakeUid(userId), 0, pwd.passwordHandle, passwordTokenToGkInput(pwdToken))</code> <strong>无条件执行</strong>（credential 为 null 时先替换成 DEFAULT_PASSWORD）</td><td>整段被 <code>if (Password != "!")</code> 包住 → 无密码的 999 永远拿不到<strong>自己的</strong> auth token，只能用机主 token，而 18.14 已证明机主 SID 不匹配 → <code>-26</code></td></tr>
+</table>
+<p>这解释了完整日志：第一次用机主 PIN 解 999 → scrypt 出的 token 对不上 999 的 <code>.pwd</code> → <code>verify ret=-1</code>；第二次用 <code>"!"</code> → 本该用 <code>scrypt("default-password", 999 的 salt)</code> 并 verify 出 999 SID 的 token，却因上述两处缺陷既算错 <code>application_id</code> 又完全没有 token。</p>
+<p><strong>新版 0007（四处改动，全部有源码依据）</strong>：</p>
+<ol>
+  <li><code>password_token</code> 先 <code>memset</code> 清零；无论是否 <code>"!"</code> 都调用 <code>Get_Password_Data()</code> 与 <code>Get_Password_Token()</code>，credential 取 AOSP 的 <code>"default-password"</code>（<code>y52s: scrypt password token</code> 标记）。</li>
+  <li>gatekeeper 条件改为 <code>if (Password != "!" || user_id != 0)</code>，让无密码 profile 也走 <code>verifyChallenge(fakeUid(999), …)</code>，成功后把 <strong>999 自己的</strong> 69 B token 写进 <code>/auth_token</code> 并置 <code>auth_token_len</code>。</li>
+  <li>999 的 verify 若仍失败<strong>不再提前 return</strong>，继续 unwrap 并留下完整日志（<code>y52s: profile verify failed, continuing</code>）。</li>
+  <li>保留 unwrap 前的机主 token fallback（<code>auth_token_len == 0</code> 时），作为最后兜底与诊断标记。</li>
+</ol>
+<p>本地「0002→0003→0004→0006→0007 + MTP + 链接补丁」全链预演 PASS，四个标记齐全、括号配平、旧 <code>memcpy</code> 已消失。提交 <code>398665f</code> → <strong>run <code>42654011759</code></strong>（16:21 UTC）。</p>
+
 <div class="foot">唯一入口：本文件。配置 <code>device/vivo/y52s/</code>，上游对照 <code>reference/</code>，
 证据 <code>device_dump/</code>，命令刷 <code>flash/</code>，TWRP 11 补丁 <code>patches/twrp11/</code>（存档），
 12.1 解密补丁 <code>patches/system_vold/</code>，CI 流水线 <code>build/{prepare_ci12_tree.py,apply_ci12_patches.sh,postprocess_ci12.py}</code>。未列出来源的参数保持 PENDING。</div>
