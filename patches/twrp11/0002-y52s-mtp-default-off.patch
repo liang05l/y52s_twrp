@@ -1,0 +1,16 @@
+--- a/data.cpp
++++ b/data.cpp
+@@ -907,7 +907,12 @@
+ #endif
+ #ifdef TW_HAS_MTP
+ 	mConst.SetValue("tw_has_mtp", "1");
+-	mPersist.SetValue("tw_mtp_enabled", "1");
++	/* y52s: MTP must NOT start before the user enters the FBE password.
++	 * Starting it early makes the PC cache encrypted (garbled) filenames.
++	 * Keep MTP available (tw_has_mtp=1); the user can enable it in Mount
++	 * after decryption. A persisted tw_mtp_enabled from an older TWRP can
++	 * still override this default -- flash/set_mtp_default_off.sh clears it. */
++	mPersist.SetValue("tw_mtp_enabled", "0");
+ 	mPersist.SetValue("tw_mtp_debug", "0");
+ #else
+ 	LOGINFO("TW_EXCLUDE_MTP := true\n");

@@ -36,6 +36,11 @@ on early-init
     symlink /mnt/vendor/persist /vendor/persist
 
 on init
+    # TWRP 11's init.rc exports only /system/lib64:/vendor/lib64/hw. The vivo
+    # keymaster/gatekeeper HALs also need libMcClient.so, libkeymaster4.so and
+    # the gatekeeper HIDL lib from /vendor/lib64 (measured missing -> HAL exits
+    # with status 1 -> fscrypt_initialize_systemwide_keys returns fail).
+    export LD_LIBRARY_PATH /system/lib64:/vendor/lib64:/vendor/lib64/hw
     # 使用 configfs USB 模式
     setprop sys.usb.configfs 1
     setprop sys.usb.ffs.aio_compat 1
@@ -168,29 +173,34 @@ on property:recovery.service=1
 # Mobicore TEE Daemon - 之前测试通过的配置
 service mobicore /vendor/bin/mcDriverDaemon --P1 /mnt/vendor/persist/mcRegistry     -r /vendor/app/mcRegistry/06090000000000000000000000000000.drbin     -r /vendor/app/mcRegistry/020f0000000000000000000000000000.drbin     -r /vendor/app/mcRegistry/05120000000000000000000000000000.drbin     -r /vendor/app/mcRegistry/05070000000000000000000000000000.drbin     -r /vendor/app/mcRegistry/030b0000000000000000000000000000.drbin     -r /vendor/app/mcRegistry/030c0000000000000000000000000000.drbin
     disabled
+    setenv LD_LIBRARY_PATH /system/lib64:/vendor/lib64:/vendor/lib64/hw
     seclabel u:r:recovery:s0
 
 
 service vendor.keymaster-4-0-trustonic /vendor/bin/hw/android.hardware.keymaster@4.0-service.trustonic
     disabled
+    setenv LD_LIBRARY_PATH /system/lib64:/vendor/lib64:/vendor/lib64/hw
     user root
     group root drmrpc
     seclabel u:r:recovery:s0
 
 service gatekeeper-1-0 /vendor/bin/android.hardware.gatekeeper@1.0-service
     disabled
+    setenv LD_LIBRARY_PATH /system/lib64:/vendor/lib64:/vendor/lib64/hw
     user root
     group root
     seclabel u:r:recovery:s0
 
 service wait_for_keymaster /system/bin/wait_for_keymaster
     disabled
+    setenv LD_LIBRARY_PATH /system/lib64:/vendor/lib64:/vendor/lib64/hw
     user root
     seclabel u:r:recovery:s0
 
 
 service guardianangle /system/bin/guardianangle
     disabled
+    setenv LD_LIBRARY_PATH /system/lib64:/vendor/lib64:/vendor/lib64/hw
     user root
     seclabel u:r:recovery:s0
 
@@ -204,6 +214,7 @@ service keystore_auth /system/bin/keystore_auth
 
 service keystore /system/bin/keystore /data/misc/keystore
     disabled
+    setenv LD_LIBRARY_PATH /system/lib64:/vendor/lib64:/vendor/lib64/hw
     user root
     group root drmrpc readproc
     seclabel u:r:recovery:s0
