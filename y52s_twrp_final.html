@@ -562,6 +562,67 @@ kernel / 8 MiB recovery_dtbo / dtb / AVB vbmeta blob 字节一致；vbmeta 重�
 <br><br>回退仍是一条命令：<code>flash_recovery.ps1 -Image .\build\recovery_v7.img</code>。
 数据始终完好，⚠️ 不要点 Format Data。</div>
 
+<h2>十二、11:00 追加 — Y73s (PD2031) 设备树带来的确定结论</h2>
+
+<h3>12.1 为什么这个仓库直接对得上</h3>
+<p><code>4accccc/android_device_vivo_pd2031</code>（分支 <code>twrp-12.1</code>）：同为
+<strong>MT6853 / 天玑720 / board <code>k6853v1_64_6360</code> / Android 10 / 非 A/B / 动态分区 / FBE</strong>。
+README 明写「配置相近机型（s7e、y52s 等）小修小补可用，改 props 后有很大概率直接解密 data」，
+且 <code>v1-final</code> Release 里有<strong>已经验证可用</strong>的 <code>twrp-recovery.img</code>（100663296 B，
+正好等于我们的分区）：触摸、亮度、adb、FBE 解密、MTP 全绿。<code>DEVELOPMENT_LOG.md</code> 逐阶段记录了踩坑过程。</p>
+
+<h3>12.2 决定性发现：AVB footer 必须换成 vivo 原厂那份（已修）</h3>
+<div class="cmd">STOCK_DUMP / V7 : vbmeta d5fe67c75120e2b7 (avbtool 1.2.0, vivo 公钥), footer 3a0ac3e3…
+CI 编译版 / 上一版修补 : vbmeta 7bb339ce0789792d (avbtool 1.1.0, AOSP test key), footer 0f30d4ed…
+boot header os_version : 原厂 0x1800063c  vs  CI 0x16000172</div>
+<p>日志第六阶段说明机制：vivo bootloader <strong>只校验 AVB 公钥是否匹配、并不真的验证 hash</strong>；
+用自签名 vbmeta 时它会把默认 <code>boot_patchlevel=20300101</code> 传给 TEE，而 FBE 密钥绑定的是
+原厂值（Y73s 上是 <code>20190606</code>）→ TEE 拒绝解密。作者的 <code>make_hybrid.py</code> 解法是
+「原厂 vbmeta + footer 嫁接到 TWRP 内容」，<strong>只改 footer 的 <code>vbmeta_offset</code>，
+<code>original_image_size</code> 保持原厂值</strong>。</p>
+<p>我们之前的错就在这里：v1–v11 一直「保留」AVB 尾部，但保留的是 <strong>CI 自己那份</strong>，
+等于一直在用 TWRP 自签名。现已修正 <code>build/postprocess_ci.py</code>：改用
+<code>device_dump/.../images/recovery.img</code> 的 vivo vbmeta + footer，并把 boot header 的
+<code>os_version</code> 逐字复制成原厂值。新产物
+<code>build/recovery.img</code> sha256 <code>54acf0f8…</code>，验证：vbmeta 与 stock 完全一致、
+footer 的 <code>original_image_size</code> 一致、<code>vbmeta_offset</code> 更新为 <code>0x2dcc800</code>。</p>
+
+<h3>12.3 逐条对应我们踩过的坑</h3>
+<table>
+  <tr><th>我们的卡点</th><th>Y73s 的做法 / 结论</th><th>当前处理</th></tr>
+  <tr><td>触摸失效</td><td><code>recovery/root</code> 里放 <code>vts_app_recovery</code> + <code>on boot exec ... --update</code> + 触摸固件</td><td>✅ 上一章已按同一结论修好</td></tr>
+  <tr><td>逻辑分区不挂载 / <code>/vendor</code> 缺失</td><td>用 <code>vivo-4.x-kernel-autopatch</code> 修 kernel 破除 mount 限制</td><td>我们用 <code>y52s_prepare.sh</code> 手动挂载，等效</td></tr>
+  <tr><td><code>adb reboot recovery</code> 弹 GUI 确认页卡住</td><td><code>on property:sys.powerctl=reboot,recovery → exec rebootrecovery.sh</code></td><td>目前用 misc BCB + sysrq 硬重启绕开</td></tr>
+  <tr><td>每次重启都回 recovery</td><td><code>clear_bcb.sh</code> 清 BCB</td><td>我们写的 <code>boot-recovery</code> BCB 仍需清理</td></tr>
+  <tr><td>12.1 的 keystore2 AIDL 卡死 DE 初始化</td><td>日志原话「如果我选择安卓10的版本构建的话就不会出这种事」，改为重写 Keymaster HIDL 4.0</td><td>✅ 我们锁 <code>twrp-11</code> 正是避开了它</td></tr>
+  <tr><td>SDK / 补丁级别与密钥不匹配</td><td><code>TW_INCLUDE_RESETPROP := true</code> + <code>on post-fs</code> 用 resetprop 强制 6 个 <code>*.version.sdk=29</code>；<code>auto_patchlevel.sh</code> 从 super 分区动态读真实安全补丁</td><td>我们直接改 <code>prop.default</code> 12 行为 <code>10/29</code>，补丁写死实测 <code>2023-02-01</code>；动态检测待补</td></tr>
+  <tr><td>HAL 服务顺序</td><td><code>mobicore → keymaster → gatekeeper → wait_for_keymaster</code>，并 <code>stop keystore2</code>，「错了就炸解密」</td><td>目前只有 keymaster/gatekeeper；待真机验证后补</td></tr>
+  <tr><td>FBE 的 <code>ReadDefaultFstab()</code> 在 recovery 下失败</td><td>vold 打补丁硬编码回退 <code>aes-256-xts:aes-256-cts v1</code> + legacy keyring</td><td>我们是 11 基线的 <code>libtwrpfscrypt.so</code>，路径不同，需真机验证</td></tr>
+</table>
+
+<h3>12.4 复用优先级与新增文件</h3>
+<ul>
+  <li><strong>已落地</strong>：AVB 杂交（决定性）、触摸链、版本属性对齐。</li>
+  <li><strong>新增通用工具</strong> <code>build/make_hybrid.py</code>：把 vivo 原厂 vbmeta/footer 嫁接到任意
+      recovery.img。对 v7 输出与原厂布局完全一致、对当前镜像幂等，已验证。以后无论用我们的 CI 版
+      还是移植 Y73s 镜像，最后都要过这一步。</li>
+  <li><strong>待真机验证后再动</strong>：resetprop 强制属性、mobicore / wait_for_keymaster 服务顺序、
+      <code>auto_patchlevel.sh</code> 动态补丁、<code>clear_bcb.sh</code> / <code>rebootrecovery.sh</code>。
+      这些组件来自 Y73s（PD2031），同平台可复用，但我们的 11 基线解密路径与它的 12.1+补丁不同，
+      不预先堆未验证改动。</li>
+  <li><strong>备选路线</strong>：直接移植 <code>v1-final</code> 的 <code>twrp-recovery.img</code>
+      （改 props → 换 Y52s kernel/dtb/dtbo 与触摸固件 → <code>make_hybrid.py</code>）。镜像正在下载到
+      <code>build/reference/y73s_twrp.img</code>，配置已存 <code>reference/y73s/</code>。
+      若当前修补版真机解密仍失败，走这条比继续补 11 基线更稳。</li>
+</ul>
+
+<h3>12.5 当前状态</h3>
+<div class="block">设备 <code>adb</code> / <code>fastboot</code> / PnP <strong>仍然离线</strong>（连续多次复查），
+所以 <code>54acf0f8…</code> 这版<strong>还没刷入</strong>，解密与触摸都未经真机确认。
+重插数据线（或用音量键+电源在 TWRP 里 Reboot→System）后告诉我，我立刻刷入并抓
+<code>getevent -il</code>、<code>recovery.log</code>、<code>dmesg</code> 里的 <code>boot_patchlevel</code> 验证。
+回退：<code>flash_recovery.ps1 -Image .\build\recovery_v7.img</code>。⚠️ 数据完好，别点 Format Data。</div>
+
 <div class="foot">唯一入口：本文件。配置 <code>device/vivo/y52s/</code>，上游对照 <code>reference/</code>，
 证据 <code>device_dump/</code>，命令刷 <code>flash/</code>，云端编译 <code>.github/workflows/</code>，
 产物取证 <code>build/inspect_ci_image.py</code>。未列出来源的参数保持 PENDING。</div>

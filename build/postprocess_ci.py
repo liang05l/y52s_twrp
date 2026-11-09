@@ -34,8 +34,9 @@ WHAT THIS DOES
 * points init.rc's ${ro.hardware} import at that single rc (deterministic)
 * aligns prop.default version props to the measured Android 10 values
   (10 / 29 / 2023-02-01 / vendor 2020-07-05) -- v5 proved keymaster needs it
-* keeps kernel, recovery_dtbo, dtb and the AVB vbmeta blob byte-identical;
-  relocates vbmeta + footer to the new content end
+* keeps kernel, recovery_dtbo and dtb byte-identical; REPLACES the
+  CI self-signed AVB vbmeta/footer with the STOCK vivo ones (only
+  vbmeta_offset is rewritten) and copies the stock boot-header os_version
 
 Output: build/recovery.img (+ .sha256), zero-padded to 100663296 B.
 No /data access, no format, no wipe.
@@ -162,14 +163,26 @@ ci_by = {e["name"]: e for e in ci_ents}
 v7_by = {e["name"]: e for e in v7_ents}
 print("cpio entries: CI=%d v7=%d" % (len(ci_ents), len(v7_ents)))
 
-# AVB footer / vbmeta from CI
-foot = bytearray(ci_raw[PART_SIZE - 64:PART_SIZE])
-assert foot[:4] == b"AVBf", "AVB footer missing"
+# AVB footer / vbmeta MUST come from the STOCK vivo image, not from the CI
+# build.  Measured: stock vbmeta sha256 d5fe67c75120e2b7 (avbtool 1.2.0),
+# CI vbmeta sha256 7bb339ce0789792d (avbtool 1.1.0, TWRP test key).
+# The vivo bootloader trusts only its own public key; with a self-signed
+# vbmeta it hands the TEE the default boot_patchlevel 20300101 instead of
+# the value the FBE keys were bound to -> decryption always fails.
+# (Confirmed by 4accccc/android_device_vivo_pd2031 DEVELOPMENT_LOG stage 6
+#  and its make_hybrid.py.)
+STOCK = os.path.join(ROOT, "device_dump", "y52s_dump_20261108_122327",
+                     "images", "recovery.img")
+stock_raw = open(STOCK, "rb").read()
+assert len(stock_raw) == PART_SIZE
+foot = bytearray(stock_raw[PART_SIZE - 64:PART_SIZE])
+assert foot[:4] == b"AVBf", "stock AVB footer missing"
 vbmeta_size = struct.unpack_from(">Q", foot, 28)[0]
-vbmeta_off = struct.unpack_from(">Q", foot, 20)[0]
-vbmeta = ci_raw[vbmeta_off:vbmeta_off + vbmeta_size]
-assert vbmeta[:4] == b"AVB0", "vbmeta blob missing"
-print("AVB: vbmeta_offset=0x%x size=%d" % (vbmeta_off, vbmeta_size))
+stock_vbo = struct.unpack_from(">Q", foot, 20)[0]
+vbmeta = stock_raw[stock_vbo:stock_vbo + vbmeta_size]
+assert vbmeta[:4] == b"AVB0", "stock vbmeta blob missing"
+print("AVB: using STOCK vivo vbmeta sha=%s size=%d (CI self-signed one discarded)" %
+      (hashlib.sha256(vbmeta).hexdigest()[:16], vbmeta_size))
 
 # ---------------------------------------------------------------------------
 # 1) verbatim device-specific payload from v7
@@ -319,6 +332,9 @@ hdr = bytearray(ci_raw[:ci["hsz"]])
 struct.pack_into("<I", hdr, 16, len(gz))                 # ramdisk_size
 new_dtbo_off = ci["roff"] + pg(len(gz), ci["page"])
 struct.pack_into("<Q", hdr, 1636, new_dtbo_off)           # recovery_dtbo_offset
+# boot header os_version / os_patch_level: measured stock 0x1800063c,
+# CI build 0x16000172. Copy the stock value verbatim (no invented numbers).
+struct.pack_into("<I", hdr, 44, struct.unpack_from("<I", stock_raw, 44)[0])
 
 out = bytearray(b"\0" * PART_SIZE)
 out[:ci["hsz"]] = hdr
@@ -333,10 +349,11 @@ out[p:p + len(ci["dtb"])] = ci["dtb"]
 content_end = p + pg(len(ci["dtb"]), ci["page"])
 
 new_vbo = pg(content_end, ci["page"]) + ci["page"]
-orig_size = new_vbo - ci["page"]
 assert new_vbo + vbmeta_size < PART_SIZE - 64, "image too large"
 out[new_vbo:new_vbo + vbmeta_size] = vbmeta
-struct.pack_into(">Q", foot, 12, orig_size)
+# make_hybrid.py behaviour: only vbmeta_offset is rewritten. original_image_size
+# stays at the STOCK value -- vivo's bootloader checks the public key, not the
+# hash, which is exactly why a hybrid image is possible at all.
 struct.pack_into(">Q", foot, 20, new_vbo)
 out[PART_SIZE - 64:PART_SIZE] = foot
 assert len(out) == PART_SIZE
