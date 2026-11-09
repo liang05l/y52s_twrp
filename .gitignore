@@ -54,6 +54,9 @@ reference/y52s_official_recovery.img
 # (*token*) would otherwise swallow.
 !patches/twrp11/
 !patches/twrp11/*.patch
+# The Y73s 12.1 vold patch filename also contains "token".
+!patches/system_vold/
+!patches/system_vold/*.patch
 # Local investigation scratch (downloaded manifests, raw logs, test repos).
 .cache/
 flash/probe_u999_spblob.sh

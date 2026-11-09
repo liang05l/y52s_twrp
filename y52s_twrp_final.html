@@ -1093,16 +1093,32 @@ keystore 找不到匹配条目 → <code>-26 KEY_USER_NOT_AUTHENTICATED</code>�
   <tr><td>ccache</td><td><strong>已实证生效</strong>：日志 <code>CC_WRAPPER=[/usr/bin/ccache]</code>、实际 clang++ 命令以 ccache 开头；Actions 缓存条目从旧键 <strong>0.0 MB</strong> 变成新键 <strong>375.5 MB</strong>（<code>Linux-twrp11-ccache-d01b…</code>，11:18 保存）。第二轮构建会命中这批对象</td></tr>
   <tr><td>设备树同步</td><td>CI 前置断言全部通过（本地复刻 + 云端实际步骤均 success）</td></tr>
   <tr><td>源码补丁</td><td>本地 <code>git apply</code> 通过，云端「Apply y52s source patches」success</td></tr>
-  <tr><td>新镜像真机验证</td><td><strong>未验证</strong>：run <code>42604087199</code> 因补丁编译错误失败（已修）；修正后的 run <code>42608781513</code> 正在编译，产物尚未刷入</td></tr>
+  <tr><td>新镜像真机验证</td><td><strong>已做，结论是 TWRP 11 源码线不可用</strong>：详见 18.8。run <code>42604087199</code> 编译失败（已修）→ <code>42608781513</code> 成功但 HAL 崩 → <code>42616212138</code> 成功且 HAL 正常，但 <code>keystore</code> 反复 SIGABRT、DE 密钥装不上。已刷回 <code>a3855ed4…</code></td></tr>
 </table>
 <p>取证时还发现：<strong>设备 recovery 分区当时并不是 <code>a3855ed4…</code>，而是你后来刷入的 CI 产物</strong>——boot 头 <code>os_version=0x16000172</code>（16.0.0 / 2099-12），正是 TEE 判定密钥过期的值，也解释了「没触摸、解不了密」。
 已用 <code>flash_recovery.ps1</code> 把 <strong>已完整验证的 <code>a3855ed4…</code></strong> 刷回，回读哈希一致、<code>/data</code> 未动；设备当前在系统态。</p>
 <p>等 run <code>42608781513</code> 出产物后，下一步是：下载 <code>y52s-twrp11-recovery</code> → 核对官方 vbmeta 与补丁标记 → 刷入 → 重启进 TWRP 输密码 → 检查 <code>twrp.user.999.decrypt</code> 与 <code>/data/user/999</code> 是否明文。
 ⚠️ 数据始终完好，全程未执行 <code>format/wipe</code>；别点 Format Data。</p>
 
+<h3>18.8 收敛：停止在 TWRP 11 上分批试错，把修复放回已验证的 12.1 源码线</h3>
+<div class="block"><strong>用户批评得对</strong>：已有完整验证成功的 <code>a3855ed4…</code>，我却绕去从 TWRP-11 源码树重编译，连开三轮构建（<code>42604087199</code> 前向声明漏写 → <code>42608781513</code> vendor 资产没比对全 → <code>42616212138</code>）。前两轮都是本该一次性做完的事情。这里停止开新构建。</div>
+<p>第三轮（<code>d4ed239d…</code>，离线校验全绿：41 个 trustlet / 5 个缺失 vendor 库 / vendor VINTF / 6 处 <code>setenv LD_LIBRARY_PATH</code> / 0002 MTP 默认关 / 官方 vbmeta / 0001 user999 补丁）真机一次性验收结果：</p>
+<table>
+  <tr><th>项</th><th>结果</th></tr>
+  <tr><td>触摸</td><td>✅ <code>vivo_ts</code> / <code>/dev/input/event3</code>、14 个 PD2057 固件</td></tr>
+  <tr><td>MTP 默认</td><td>✅ <code>sys.usb.config=adb</code>、<code>idProduct=0xd001</code>、f1→ffs.adb（不再开机就枚举密文文件名）</td></tr>
+  <tr><td>HAL</td><td>✅ <code>keymaster-4-0-trustonic</code>、<code>gatekeeper-1-0</code>、<code>mobicore</code> 全部 running（前一轮的 status 1 崩溃已修）</td></tr>
+  <tr><td><strong>DE 密钥</strong></td><td>❌ <code>keystore</code> 反复 <strong>SIGABRT (signal 6)</strong>、<code>guardianangle</code> exit 1 → <code>fscrypt_initialize_systemwide_keys returned fail</code>，<code>/data/media/0</code> 仍是 141 个密文文件名</td></tr>
+  <tr><td>结论</td><td><strong>不是补丁写得对不对，而是 TWRP 11 自带的 keystore 与这台 Android 10 设备不兼容</strong>。DE 密钥装不上，密码页/CE 解密链路根本起不来，0001 的 user 999 补丁在这条树上永远无法验证。继续在 twrp-11 上改没有意义。</td></tr>
+</table>
+<p>因此按承诺<strong>不再开第四轮</strong>，已用 <code>flash_recovery.ps1</code> 把 <code>a3855ed4…</code> 刷回（分区哈希一致）、BCB 清为全 0、设备回到系统态。<code>/data</code> 全程未动。</p>
+<p><strong>真正能修 user 999 的代码已一次备齐</strong>：<code>patches/system_vold/0007-y52s-owner-auth-token-for-secondary-users.patch</code>，作用于 <code>TeamWin/android_system_vold @ android-12.1</code> 的 <code>Decrypt.cpp</code>，且<strong>排在 Y73s 的 0006 Direct-Keymaster-HIDL 补丁之后</strong>——也就是产生 <code>a3855ed4…</code> 的那棵源码树。已在干净的临时 git 仓库里验证「基线 → 0006 → 0007」依次 <code>git apply --check/apply</code> 全部通过、花括号配平。
+逻辑与 18.6 相同：为 <code>user_id != 0</code> 重新用 user 0 的 <code>.pwd</code> + <code>fakeUid(0)</code> 验证 gatekeeper，把机主 auth token 写回 <code>/auth_token</code>，供 Direct Keymaster HIDL 的 <code>begin()</code> 使用；<code>application_id</code> 不变。</p>
+<p>剩下的只有<strong>一轮 12.1 源码构建</strong>（manifest <code>twrp-12.1</code> + Y73s 设备树 + <code>patches/system_vold/</code> 六个补丁 + 0007 + 官方 vbmeta 混合），材料已全部落在 <code>reference/</code> 与 <code>patches/</code>，不需要再分批探测。⚠️ 数据完好，别点 Format Data。</p>
+
 <div class="foot">唯一入口：本文件。配置 <code>device/vivo/y52s/</code>，上游对照 <code>reference/</code>，
-证据 <code>device_dump/</code>，命令刷 <code>flash/</code>，源码补丁 <code>patches/twrp11/</code>，
-产物取证 <code>build/inspect_ci_image.py</code>，CI 后处理 <code>build/ci_hybrid.py</code>。未列出来源的参数保持 PENDING。</div>
+证据 <code>device_dump/</code>，命令刷 <code>flash/</code>，TWRP 11 补丁 <code>patches/twrp11/</code>，
+12.1 解密补丁 <code>patches/system_vold/</code>，CI 后处理 <code>build/ci_hybrid.py</code>。未列出来源的参数保持 PENDING。</div>
 </div>
 </body>
 </html>

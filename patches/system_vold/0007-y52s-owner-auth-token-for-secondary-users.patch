@@ -1,0 +1,126 @@
+--- a/Decrypt.cpp
++++ b/Decrypt.cpp
+@@ -944,6 +944,104 @@
+ 
+ // /* Decrypt_User_Synth_Pass is the TWRP C++ equivalent to spBasedDoVerifyCredential
+ //  * https://android.googlesource.com/platform/frameworks/base/+/android-8.0.0_r23/services/core/java/com/android/server/locksettings/LockSettingsService.java#1998 */
++/* ===========================================================================
++ * y52s / PD2057 -- owner auth token for secondary / vivo DOUBLE_APP users.
++ * Applied AFTER Y73s 0006-Direct-Keymaster-HIDL-for-synthetic-password.patch.
++ *
++ * MEASURED on this device (root, 2026-11-09):
++ *   userlist.xml                  -> <user id="0"/> <user id="999"/>
++ *   /data/system_de/999/spblob/   -> own .pwd/.secdis/.spblob/.handle
++ *   /data/misc/keystore/user_0/   -> 1000_USRPKEY_synthetic_password_8b062251e4788049 (user 0)
++ *                                   1000_USRPKEY_synthetic_password_c977db9a6356c1ad (user 999 !)
++ *   /data/misc/keystore/user_999/ -> only *_test keys, NO synthetic-password key
++ *   /data/misc/vold/user_keys/ce/999/current/ -> encrypted_key / secdiscardable
++ *
++ * Real-device log with the true PIN:
++ *   [DEBUG] Decrypt_User: ENTER user_id=999
++ *   [SPBLOB] Found key file: /data/misc/keystore/user_0/1000_USRPKEY_synthetic_password_c977db9a6356c1ad
++ *   [SPBLOB] Got key characteristics successfully
++ *   [Keymaster] begin: km_error=-26      (KEY_USER_NOT_AUTHENTICATED)
++ *   failed to unwrapSyntheticPasswordBlob
++ * User 0 with the same PIN succeeds. -26 comes from the auth token: the
++ * profile's SP key lives in the OWNER's keystore namespace and is bound to
++ * the OWNER's gatekeeper SID, but verify(fakeUid(999)) returns a token with
++ * the profile's SID. It is NOT a wrong password and NOT a "secdis branch"
++ * difference (user 0 uses the same secdis branch).
++ *
++ * Fix: re-verify gatekeeper with the OWNER's password handle and the same
++ * LSKF (unified challenge), then overwrite /auth_token with that token.
++ * unwrapSyntheticPasswordBlob() parses /auth_token into the HardwareAuthToken
++ * passed to keymaster begin(). application_id is unchanged -- it still uses
++ * the profile's own password token + secdiscardable.
++ * =========================================================================== */
++static bool Write_Owner_Auth_Token(const std::string& Password) {
++    const std::string owner_path = "/data/system_de/0/spblob/";
++    KeystoreInfo keystore_info;
++    std::string owner_handle = keystore_info.getHandle(0);
++    if (owner_handle.empty()) {
++        printf("y52s: no owner spblob handle\n");
++        return false;
++    }
++    password_data_struct pwd0;
++    pwd0.salt = NULL;
++    pwd0.salt_len = 0;
++    pwd0.password_handle = NULL;
++    pwd0.handle_len = 0;
++    if (!Get_Password_Data(owner_path, owner_handle, &pwd0)) {
++        Free_Return(false, NULL, &pwd0);
++        return false;
++    }
++    if (pwd0.handle_len <= 0) {
++        printf("y52s: owner has no gatekeeper handle\n");
++        Free_Return(false, NULL, &pwd0);
++        return false;
++    }
++    unsigned char owner_token[PASSWORD_TOKEN_SIZE];
++    if (!Get_Password_Token(&pwd0, Password, &owner_token[0])) {
++        Free_Return(false, NULL, &pwd0);
++        return false;
++    }
++    void* gk_token = PersonalizedHashBinary(PERSONALIZATION_USER_GK_AUTH,
++                                            (char*)&owner_token[0], PASSWORD_TOKEN_SIZE);
++    if (!gk_token) {
++        Free_Return(false, NULL, &pwd0);
++        return false;
++    }
++    android::sp<android::hardware::gatekeeper::V1_0::IGatekeeper> gk =
++        android::hardware::gatekeeper::V1_0::IGatekeeper::getService();
++    if (gk == nullptr) {
++        free(gk_token);
++        Free_Return(false, NULL, &pwd0);
++        return false;
++    }
++    android::hardware::hidl_vec<uint8_t> handle_hidl;
++    handle_hidl.setToExternal(static_cast<uint8_t*>(pwd0.password_handle), pwd0.handle_len);
++    android::hardware::hidl_vec<uint8_t> token_hidl;
++    token_hidl.setToExternal(static_cast<uint8_t*>(gk_token), SHA512_DIGEST_LENGTH);
++    bool ok = false;
++    android::hardware::Return<void> hwRet = gk->verify(
++        fakeUid(0), 0 /* challenge */, handle_hidl, token_hidl,
++        [&ok](const android::hardware::gatekeeper::V1_0::GatekeeperResponse& rsp) {
++            if (rsp.code >= android::hardware::gatekeeper::V1_0::GatekeeperStatusCode::STATUS_OK) {
++                unlink("/auth_token");
++                FILE* f = fopen("/auth_token", "wb");
++                if (f != NULL) {
++                    fwrite(rsp.data.data(), sizeof(uint8_t), rsp.data.size(), f);
++                    fclose(f);
++                    ok = true;
++                    printf("y52s: owner auth token written (%zu bytes)\n", rsp.data.size());
++                }
++            }
++        });
++    free(gk_token);
++    Free_Return(false, NULL, &pwd0);   // frees pwd0.salt / pwd0.password_handle
++    if (!hwRet.isOk() || !ok) {
++        printf("y52s: owner gatekeeper verification failed\n");
++        return false;
++    }
++    return true;
++}
++
+ bool Decrypt_User_Synth_Pass(const userid_t user_id, const std::string& Password) {
+ 	printf("Attempting to decrypt user's synthetic password\n");
+ 	bool retval = false;
+@@ -1111,7 +1209,17 @@
+ 				printf("gatekeeper verification failed (ret=%d)\n", ret);
+ 				return Free_Return(retval, weaver_key, &pwd);
+ 			}
+-			printf("[SECDIS] Gatekeeper verification succeeded\n");
++			printf("[SECDIS] Gatekeeper verification succeeded\n");
++
++			// y52s: secondary users (e.g. vivo DOUBLE_APP user 999) keep their
++			// synthetic-password key in the OWNER's keystore namespace and it is
++			// bound to the OWNER's gatekeeper SID. Replace the profile token with
++			// the owner's token before unwrapSyntheticPasswordBlob() reads
++			// /auth_token. Without this keymaster returns -26.
++			if (user_id != 0) {
++				if (!Write_Owner_Auth_Token(Password))
++					printf("y52s: owner token unavailable, keeping profile token\n");
++			}
+ 		}
+ 	}
+ 	// Now we will handle https://android.googlesource.com/platform/frameworks/base/+/android-8.0.0_r23/services/core/java/com/android/server/locksettings/SyntheticPasswordManager.java#816
