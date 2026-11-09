@@ -16,14 +16,25 @@ Porting rules -- every substituted value is MEASURED on this device, not guessed
   * kernel / dtb   <- Y52s STOCK (display + touch drivers must match the panel;
                      v7 proved this combination boots and shows the GUI)
   * recovery_dtbo  <- 0 (Y52s stock layout; v7 uses this)
-  * boot header os_version <- Y52s stock 0x1800063c
+  * boot header os_version <- THIS DEVICE's real boot partition header
+        (build/y52s_boot_hdr.bin, read via dd): 0x14000172 = Android 10.0.0 /
+        2023-02. The "stock" recovery image we dumped is itself a TWRP build
+        whose header is the hack value 0x1800063c = 12.0.0 / 2099-12; copying
+        that value made the TEE demand KEY_REQUIRES_UPGRADE (-62) on every key.
+  * embedded vbmeta properties <- replace the same hack values
+        (boot.security_patch 2099-12-31 -> 2023-02-01,
+         boot.os_version 16.1.0 -> 10.0.0). Same-length in-place edits; the
+         vivo LK verifies only the public key, not the hash (Y73s dev log 6.5).
   * prop.default   <- PD2031 -> PD2057, compiler10052108 -> compiler04181705,
                       compiler10052108 in description -> compiler09042257,
                       security_patch 2020-09-01 -> 2023-02-01,
                       all *.version.sdk 32 -> 29, build.id -> QP1A.190711.020
   * fstab          <- device/vivo/y52s/recovery.fstab (measured partition set)
   * touch firmware <- Y52s v7 vendor/firmware/* (14 blobs, PD2057 panel)
-  * gatekeeper rc  <- /vendor/bin/hw/... (path measured on this device)
+  * gatekeeper rc  <- keep /vendor/bin/... : that is where the Y73s ramdisk
+        actually ships the binary (verified on the running image). Rewriting
+        it to /vendor/bin/hw/... (which exists on the Y52s VENDOR PARTITION,
+        not in this ramdisk) leaves the service unregistered.
   * AVB footer/vbmeta <- Y52s STOCK (make_hybrid.py rule)
 
 Output: build/recovery_y73s_port.img (+ .sha256). ALWAYS run make_hybrid.py
@@ -45,6 +56,7 @@ STOCK = os.path.join(ROOT, "device_dump", "y52s_dump_20261108_122327",
                      "images", "recovery.img")
 V7 = os.path.join(ROOT, "build", "recovery_v7.img")
 FSTAB = os.path.join(ROOT, "device", "vivo", "y52s", "recovery.fstab")
+BOOT_HDR = os.path.join(ROOT, "build", "y52s_boot_hdr.bin")
 DST = os.path.join(ROOT, "build", "recovery_y73s_port.img")
 PART_SIZE = 100663296
 
@@ -184,7 +196,18 @@ for e in v7_ents:
         fw_added.append(ne["name"])
 print("touch firmware replaced with %d Y52s blobs" % len(fw_added))
 
-# --- 4b) Y73s rc files still hard-code PD2031 for the touch-firmware picker.
+# --- 4b) Y73s puts configfs USB + the touch exec in
+# init.recovery.mt6853.rc, loaded only by init.rc's ${ro.hardware} import.
+# Property expansion there is unreliable (measured on this device), so make
+# the import explicit. Otherwise neither adb nor the touch updater starts.
+irc = by["system/etc/init/hw/init.rc"]
+it = irc["data"].decode("utf-8", "replace")
+old_import = "import /init.recovery.${ro.hardware}.rc"
+assert old_import in it, "Y73s init.rc import line not found"
+irc["data"] = it.replace(old_import, "import /init.recovery.mt6853.rc", 1).encode()
+print("init.rc: ${ro.hardware} import replaced with explicit mt6853.rc")
+
+# --- 4c) Y73s rc files still hard-code PD2031 for the touch-firmware picker.
 # Measured on this device: ro.vivo.product.model / ro.vendor.vivo.product.model
 # are PD2057. Without this, vts_app_recovery looks for PD2031 firmware while
 # the ramdisk carries PD2057 blobs -> "no firmware for product" -> no touch.
@@ -197,27 +220,41 @@ for e in y_ents:
             rc_fixed += 1
 print("rc files with PD2031 -> PD2057:", rc_fixed)
 
-# --- 4c) gatekeeper service path (measured: /vendor/bin/hw/...) --------------
+# --- 4c) gatekeeper service path -------------------------------------------
+# The Y73s ramdisk ships the binary at /vendor/bin/. Keep that path. An
+# earlier revision rewrote it to /vendor/bin/hw/... (measured on the Y52s
+# VENDOR PARTITION), but that path does not exist in this ramdisk, so init
+# refused to register gatekeeper-1-0 at all -- confirmed by an empty
+# "getprop init.svc.gatekeeper-1-0" on the device.
 gk = 0
 for e in y_ents:
     if e["name"].endswith(".rc"):
         txt = e["data"].decode("utf-8", "replace")
-        old = "service gatekeeper-1-0 /vendor/bin/android.hardware.gatekeeper@1.0-service"
-        if old in txt:
-            e["data"] = txt.replace(
-                old,
-                "service gatekeeper-1-0 /vendor/bin/hw/android.hardware.gatekeeper@1.0-service",
-                1).encode()
+        wrong = "service gatekeeper-1-0 /vendor/bin/hw/android.hardware.gatekeeper@1.0-service"
+        right = "service gatekeeper-1-0 /vendor/bin/android.hardware.gatekeeper@1.0-service"
+        if wrong in txt:
+            e["data"] = txt.replace(wrong, right, 1).encode()
             gk += 1
-print("gatekeeper rc paths fixed:", gk)
+found = any(b"service gatekeeper-1-0 /vendor/bin/android.hardware.gatekeeper@1.0-service"
+            in e["data"] for e in y_ents if e["name"].endswith(".rc"))
+assert found, "gatekeeper service definition lost"
+print("gatekeeper rc paths corrected:", gk)
 
 # --- 5) rebuild boot image with Y52s kernel/dtb -----------------------------
+# The OS version / patch level is read from THIS DEVICE's real boot partition
+# header (dumped with dd, see flash/probe_*). It is NOT taken from the "stock"
+# recovery image, which is itself a TWRP build with a 2099-12 hack value.
+boot_hdr = open(BOOT_HDR, "rb").read()
+assert boot_hdr[:8] == b"ANDROID!", "boot header dump invalid"
+real_os_version = struct.unpack_from("<I", boot_hdr, 44)[0]
+assert real_os_version == 0x14000172, \
+    "unexpected real os_version 0x%08x" % real_os_version
 cpio = cpio_build(y_ents)
 gz = gzip.compress(cpio, mtime=0)
 hdr = bytearray(y_raw[:y["hsz"]])
 struct.pack_into("<I", hdr, 8, len(s["kernel"]))       # kernel_size
 struct.pack_into("<I", hdr, 16, len(gz))                # ramdisk_size
-struct.pack_into("<I", hdr, 44, struct.unpack_from("<I", s_raw, 44)[0])  # os_version
+struct.pack_into("<I", hdr, 44, real_os_version)        # OS 10.0.0 / 2023-02
 struct.pack_into("<I", hdr, 1632, 0)                    # recovery_dtbo_size = 0
 struct.pack_into("<Q", hdr, 1636, 0)                    # recovery_dtbo_offset = 0
 struct.pack_into("<I", hdr, 1648, s["dtb_sz"])          # dtb_size
@@ -238,8 +275,32 @@ foot = bytearray(s_raw[PART_SIZE - 64:PART_SIZE])
 assert foot[:4] == b"AVBf"
 svbo = struct.unpack_from(">Q", foot, 20)[0]
 svbs = struct.unpack_from(">Q", foot, 28)[0]
-vbmeta = s_raw[svbo:svbo + svbs]
-assert vbmeta[:4] == b"AVB0"
+vbmeta = bytearray(s_raw[svbo:svbo + svbs])
+assert bytes(vbmeta[:4]) == b"AVB0"
+
+
+def replace_prop_value(blob, key, old, new):
+    """Same-length in-place edit of an AVB property descriptor value."""
+    k = blob.find(key.encode())
+    assert k >= 0, "vbmeta property missing: " + key
+    v = blob.find(old, k, k + 160)
+    assert v >= 0, "vbmeta hack value missing: " + repr(old)
+    assert len(old) == len(new), "value length must not change"
+    blob[v:v + len(old)] = new
+
+
+# The dumped "stock" recovery is a TWRP build whose vbmeta carries hack values.
+# Those values are what the bootloader passes to the TEE as boot_patchlevel;
+# 2099-12-31 makes every FBE key look outdated => KM_ERROR_KEY_REQUIRES_UPGRADE.
+# Replace them with the values measured from THIS device (system patch level
+# 2023-02-01, Android 10). Y73s dev log 6.5: vivo LK checks the public key only,
+# not the vbmeta hash, so a same-length descriptor edit stays bootable.
+replace_prop_value(vbmeta, "com.android.build.boot.security_patch",
+                   b"2099-12-31", b"2023-02-01")
+replace_prop_value(vbmeta, "com.android.build.boot.os_version",
+                   b"16.1.0", b"10.0.0")
+vbmeta = bytes(vbmeta)
+print("vbmeta patched: patchlevel 2099-12-31 -> 2023-02-01, os 16.1.0 -> 10.0.0")
 new_vbo = pg(content_end, y["page"]) + y["page"]
 assert new_vbo + svbs + 64 < PART_SIZE
 out[new_vbo:new_vbo + svbs] = vbmeta
@@ -252,8 +313,10 @@ assert chk["kernel"] == s["kernel"]
 assert chk["dtb"] == s["dtb"]
 assert bytes(out[new_vbo:new_vbo + svbs]) == vbmeta
 assert len(cpio_parse(gzip.decompress(chk["ramdisk"]))) == len(y_ents)
-assert struct.unpack_from("<I", out, 44)[0] == struct.unpack_from("<I", s_raw, 44)[0]
-print("VERIFY OK: Y52s kernel/dtb + Y73s ramdisk + STOCK vivo AVB footer")
+assert struct.unpack_from("<I", out, 44)[0] == real_os_version
+assert b"2099-12-31" not in bytes(out[new_vbo:new_vbo + svbs])
+assert b"2023-02-01" in bytes(out[new_vbo:new_vbo + svbs])
+print("VERIFY OK: Y52s kernel/dtb + Y73s ramdisk + measured OS/patch level")
 
 open(DST, "wb").write(out)
 sha = hashlib.sha256(out).hexdigest()

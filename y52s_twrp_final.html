@@ -777,6 +777,56 @@ usb.rc 5185 B / configfs 11 处、触摸固件 14 个、AVB 仍为原厂 vivo �
 若确认是 GUI 层问题，直接刷这个（它用的是已验证触摸正常的 12.1 基线 TWRP）。
 ⚠️ 数据完好，别点 Format Data。</div>
 
+<h2>十三、11-09 14:00 — 触摸已修好；解密卡在 vivo 原厂 AVB 签名</h2>
+
+<div class="block"><strong>先说结论</strong>：换用 Y73s (PD2031) 移植版后，<strong>触摸、adb、MTP、亮度、卡刷界面全部可用</strong>。
+FBE 解密的根因已用二进制证据锁定为「recovery 分区缺 vivo 原厂签名的 vbmeta」，不是 props、不是 HAL、不是密码。
+最后一次尝试（把系统 vbmeta 分区接进 recovery）导致设备<strong>无法启动</strong>，当前需先按 13.4 恢复。</div>
+
+<h3>13.1 已经达成的（真机实测）</h3>
+<table>
+  <tr><th>项</th><th>证据 / 状态</th></tr>
+  <tr><td>触摸</td><td>用户确认「能触摸了」。根因是 <code>ro.vivo.product.model=PD2057</code> 未设，<code>vts_app_recovery --update</code> 才能匹配 PD2057 固件；<code>/dev/input/event3</code> = <code>vivo_ts</code>，ABS_MT_POSITION_X/Y = 1079/2407</td></tr>
+  <tr><td>USB / adb</td><td><code>sys.usb.configfs=1</code>、<code>sys.usb.config=mtp,adb</code>，重启 30–80 秒内 adb 自动上线，无需手动关 MTP</td></tr>
+  <tr><td>解密 HAL</td><td><code>mobicore</code>、<code>vendor.keymaster-4-0-trustonic</code> running；修 gatekeeper 路径后 <code>gatekeeper-1-0</code> 也 running；keymaster 4.0 已连上 Kinibi TEE、HMAC SUCCESS</td></tr>
+  <tr><td>解密流程</td><td>日志确有 <code>Decrypt_FBE_DE → Decrypt_DE → fscrypt_initialize_systemwide_keys → retrieveKey</code>，读到 284 B 密钥 blob；说明代码链完整，不再缺库/缺服务</td></tr>
+  <tr><td>数据</td><td>系统侧 <code>/data/media/0</code> 95 个正常条目，全程只读；TWRP 里乱码只是 CE/DE 密钥未装入内核</td></tr>
+</table>
+
+<h3>13.2 解密失败的确定根因链</h3>
+<table>
+  <tr><th>层</th><th>实测</th></tr>
+  <tr><td>现象</td><td><code>begin: km_error=-62 (KEY_REQUIRES_UPGRADE)</code> → <code>upgradeKey: FAILED error=-33</code>，重试 3 次后 <code>Decrypt_DE failed</code>；DE 密钥未装入 → <code>/data/system</code>、<code>/data/misc</code> 全是乱码名 → <code>gatekeeper.*.key</code> 找不到 → <code>Unknown password type</code></td></tr>
+  <tr><td>不是 props</td><td><code>release=10 / sdk=29 / security_patch=2023-02-01 / vendor_patch=2020-07-05</code> 全部与实测一致；<code>AutoPatchLevel</code> 从 super 分区读到 2023-02-01 并成功设置</td></tr>
+  <tr><td>不是 boot 头</td><td>原「stock」recovery 的头是 TWRP hack 值 <code>0x1800063c</code>（12.0.0 / 2099-12）；从<strong>本机真实 boot 分区</strong> dd 出的正确值是 <code>0x14000172</code>（10.0.0 / 2023-02），已改正</td></tr>
+  <tr><td>不是 footer 值</td><td>内嵌 vbmeta 的 <code>boot.security_patch=2099-12-31</code> / <code>boot.os_version=16.1.0</code> 也是 hack 值，已同长度原地改为 <code>2023-02-01</code> / <code>10.0.0</code></td></tr>
+  <tr><td><strong>真正根因</strong></td><td>系统 <code>vbmeta.img</code> 分区公钥 <code>4bdf3ccd…</code>（vivo 原厂，avbtool 1.1.0）；而 dump 里的「stock」recovery 与 CI 编译版内嵌 vbmeta 公钥<strong>同为</strong> <code>7728e30f…</code>（AOSP test key，avbtool 1.2.0）。按 Y73s 开发日志第六阶段，自签名 vbmeta 会让 LK 把默认 <code>boot_patchlevel</code> 传给 TEE，FBE 密钥因此被判定需要升级</td></tr>
+</table>
+<p><strong>缺少的素材</strong>：vivo <em>官方原厂</em> recovery.img 或官方 OTA 包（内含 vivo 私钥签名的 vbmeta，且带正确的 <code>boot.security_patch</code> descriptor）。本机 dump 的是第三方 TWRP，没有这份素材；不臆造签名。</p>
+
+<h3>13.3 已落地的确定性修复（保留在工程里）</h3>
+<ul>
+  <li><code>build/port_y73s.py</code>：boot 头 os_version 改为从 <code>build/y52s_boot_hdr.bin</code>（真机 dd 取证）读取的 <code>0x14000172</code>；vbmeta 两个 hack 值同长度替换；gatekeeper 服务路径改回 ramdisk 内真实存在的 <code>/vendor/bin/…</code>（此前误按 Y52s vendor 分区写成 <code>/vendor/bin/hw/…</code>，导致服务根本不注册）。产物 <code>1d890f45…</code>。</li>
+  <li><code>build/use_vivo_vbmeta.py</code>：把系统 vbmeta 分区（vivo 公钥 + 有效签名，4864 B）接进 recovery 分区，产物 <code>838f8a85…</code>。<strong>该尝试失败</strong>——它只有 chain-partition descriptors，LK 不接受，刷入后设备停在 <code>MediaTek PreLoader USB VCOM (COM10)</code>，adb/fastboot/PnP 全空。保留脚本仅供取证，禁止再刷。</li>
+  <li>设备侧只读取证器：<code>flash/probe_decrypt.sh</code>、<code>probe_keys.sh</code>、<code>probe_hal.sh</code>、<code>probe_km_tail.sh</code>、<code>verify_decrypt.sh</code>、<code>probe_input.sh</code>。</li>
+</ul>
+
+<h3>13.4 当前状态与恢复（必须先做）</h3>
+<div class="block"><strong>recovery 分区现在是 <code>838f8a85…</code>，这版启动不了</strong>，设备 USB 完全离线。
+需要一次物理操作：<strong>长按电源 10 秒以上强制关机，再正常开机</strong>（系统 boot 分区完好）；或按住音量上+电源进 fastboot。
+连上后我跑一条命令即可完成恢复：
+<pre>powershell -ExecutionPolicy Bypass -File .\flash\recover.ps1</pre>
+它会自动清掉 <code>boot-recovery</code> BCB（否则开机又进 rec）、用命令刷把<strong>触摸已验证可用</strong>的
+<code>0fda91ff…</code>（备份 <code>build/recovery_touch_ok.img</code>）写回 recovery，并核对分区哈希。
+脚本内含 fastboot 自动 reboot 与 240 秒等待；全程不写 <code>/data</code>。</div>
+
+<h3>13.5 要继续解密，需要你补的资料</h3>
+<ol>
+  <li><strong>Y52s / PD2057 官方原厂固件包或官方 recovery.img</strong>（当前系统版本 <code>PD2057_A_1.16.4</code> 最佳）。只要有它，就能取出 vivo 签名的 vbmeta 与真实 <code>boot.security_patch</code>，按 Y73s 的 <code>make_hybrid.py</code> 规则做混合镜像 —— 这一步由我完成。</li>
+  <li>锁屏密码类型（PIN / 图案 / 密码 / 仅滑动）。DE 密钥修好后，CE 密钥仍需锁屏密码派生，届时 TWRP 会弹密码框，输密码是屏幕操作。</li>
+</ol>
+<p>⚠️ 任何情况下都不要点 <strong>Format Data / Wipe Data</strong>。数据始终完好。</p>
+
 <div class="foot">唯一入口：本文件。配置 <code>device/vivo/y52s/</code>，上游对照 <code>reference/</code>，
 证据 <code>device_dump/</code>，命令刷 <code>flash/</code>，云端编译 <code>.github/workflows/</code>，
 产物取证 <code>build/inspect_ci_image.py</code>。未列出来源的参数保持 PENDING。</div>

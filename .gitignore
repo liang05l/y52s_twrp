@@ -30,3 +30,12 @@ build/*
 !flash/adb_fix.ps1
 !flash/verify_and_return.ps1
 !flash/fix_boot_loop.sh
+!build/use_vivo_vbmeta.py
+!build/y52s_boot_hdr.bin
+!flash/recover.ps1
+!flash/recover_clear_bcb.sh
+!flash/probe_decrypt.sh
+!flash/probe_keys.sh
+!flash/probe_hal.sh
+!flash/probe_km_tail.sh
+!flash/verify_decrypt.sh
