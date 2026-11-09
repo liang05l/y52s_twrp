@@ -1,0 +1,244 @@
+# ===========================================================================
+# y52s (V2057A / PD2057) -- rebuild the tree that ACTUALLY produces the
+# verified working TWRP (Y73s / twrp-12.1), with the user-999 fix.
+#
+# WHY NOT twrp-11 (see y52s_twrp_final.html 18.8):
+#   Three twrp-11 builds proved that its own `keystore` SIGABRTs on this
+#   Android 10 device; fscrypt_initialize_systemwide_keys() always fails, so
+#   DE/CE decryption can never start. The verified a3855ed4... image is a
+#   Y73s 12.1 ramdisk + Y52s kernel/dtb + official vivo vbmeta. Fix user 999
+#   by rebuilding THAT tree, not by porting the fix to an unusable one.
+#
+# DETERMINISM (all verified offline before this workflow was written):
+#   * manifest twrp-12.1 -> system/vold = TeamWin/android_system_vold@android-12.1
+#     (exact baseline used to generate the patches)
+#   * Y73s apply-patches.sh order is BROKEN: 0001 rewrites Keymaster.cpp so
+#     0006 (which contains the same rewrite) is skipped -> no Direct HIDL.
+#     Working order: 0002 -> 0003 -> 0004 -> 0006 -> our 0007.
+#   * every patch step is fail-fast; markers are asserted after applying.
+# ===========================================================================
+name: Build TWRP 12.1 (Y73s tree) for vivo Y52s
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'device/vivo/y52s/**'
+      - 'patches/system_vold/**'
+      - 'patches/bootable_recovery_12.1/**'
+      - 'reference/y73s/patches/system_vold/**'
+      - 'build/prepare_ci12_tree.py'
+      - 'build/apply_ci12_patches.sh'
+      - 'build/postprocess_ci12.py'
+
+concurrency:
+  group: y52s-twrp12-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+
+    env:
+      TWRP_WORK: /mnt/twrp
+      MANIFEST: https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git
+      BRANCH: twrp-12.1
+      DEVICE_PATH: device/vivo/k6853v1_64_6360
+      LUNCH_TARGET: omni_k6853v1_64_6360-eng
+      Y73S_REPO: https://github.com/4accccc/android_device_vivo_pd2031.git
+      USE_CCACHE: 1
+      CCACHE_EXEC: /usr/bin/ccache
+      CC_WRAPPER: /usr/bin/ccache
+      CXX_WRAPPER: /usr/bin/ccache
+      CCACHE_DIR: /mnt/ccache
+      CCACHE_MAXSIZE: 8G
+      CCACHE_COMPILERCHECK: content
+      CCACHE_BASEDIR: /
+      CCACHE_SLOPPINESS: time_macros,include_file_mtime,file_macro
+      CCACHE_CPP2: 'true'
+
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      - name: Free disk + prepare /mnt
+        run: |
+          set -e
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+          sudo docker image prune --all --force || true
+          sudo mkdir -p /mnt/twrp /mnt/ccache
+          sudo chown -R "$USER" /mnt/twrp /mnt/ccache
+          df -h /mnt
+
+      - name: Restore ccache
+        id: ccache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: /mnt/ccache
+          key: ${{ runner.os }}-twrp121-ccache-${{ hashFiles('patches/system_vold/**', 'build/postprocess_ci12.py') }}
+          restore-keys: |
+            ${{ runner.os }}-twrp121-ccache-
+
+      - name: JDK 11
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '11'
+
+      - name: Build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            git-core gnupg flex bison build-essential zip curl patch \
+            zlib1g-dev libncurses-dev libssl-dev libxml2-utils xsltproc \
+            unzip fontconfig python3 python3-pip ccache bc rsync \
+            libgl1-mesa-dev libx11-dev lib32z1-dev || true
+
+      - name: Configure ccache
+        run: |
+          set -e
+          test -x "$CCACHE_EXEC"
+          ccache -M "$CCACHE_MAXSIZE"
+          ccache -o compression=true
+          ccache -z
+          ccache -s
+
+      - name: Install repo
+        run: |
+          mkdir -p "$HOME/bin"
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo \
+            -o "$HOME/bin/repo"
+          chmod +x "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: repo init (twrp-12.1, depth=1)
+        working-directory: /mnt/twrp
+        run: |
+          "$HOME/bin/repo" init --depth=1 -u "$MANIFEST" -b "$BRANCH"
+          grep -n 'android_system_vold\|android_bootable_recovery' .repo/manifests/twrp-default.xml | head -4
+
+      - name: Clone the Y73s 12.1 device tree
+        run: |
+          set -e
+          mkdir -p "$TWRP_WORK/device/vivo"
+          rm -rf "$TWRP_WORK/$DEVICE_PATH"
+          git clone --depth 1 -b twrp-12.1 "$Y73S_REPO" "$TWRP_WORK/$DEVICE_PATH"
+          echo "cloned: $(git -C "$TWRP_WORK/$DEVICE_PATH" rev-parse --short HEAD)"
+          test -f "$TWRP_WORK/$DEVICE_PATH/BoardConfig.mk"
+          test -f "$TWRP_WORK/$DEVICE_PATH/patches/apply-patches.sh"
+
+      - name: Y52s-ise the device tree (measured assets only)
+        run: |
+          set -e
+          python3 "$GITHUB_WORKSPACE/build/prepare_ci12_tree.py" \
+            --work "$TWRP_WORK" --repo "$GITHUB_WORKSPACE"
+          echo "--- crypto flags ---"
+          grep -nE '^TW_INCLUDE_(CRYPTO|FBE)|^PLATFORM_SECURITY_PATCH|^BOARD_KERNEL_CMDLINE' \
+            "$TWRP_WORK/$DEVICE_PATH/BoardConfig.mk"
+
+      - name: repo sync
+        working-directory: /mnt/twrp
+        run: |
+          "$HOME/bin/repo" sync -c -j4 --force-sync --no-clone-bundle --no-tags
+          df -h /mnt
+          du -sh /mnt/twrp
+
+      - name: Apply decryption patches (strict order)
+        run: bash "$GITHUB_WORKSPACE/build/apply_ci12_patches.sh"
+
+      - name: Build recoveryimage
+        working-directory: /mnt/twrp
+        run: |
+          set -e
+          . build/envsetup.sh
+          lunch "$LUNCH_TARGET"
+          WRAPPER="$(get_build_var CC_WRAPPER)"
+          echo "CC_WRAPPER=[$WRAPPER]"
+          if [ -z "$WRAPPER" ]; then
+            echo "::error::CC_WRAPPER empty -- ccache not wired"
+            exit 1
+          fi
+          ccache -z
+          if type mka >/dev/null 2>&1; then
+            mka recoveryimage -j4
+          else
+            make recoveryimage -j4
+          fi
+          echo "=== ccache after build ==="
+          ccache -s
+          ls -lh out/target/product/k6853v1_64_6360/recovery.img
+
+      - name: Post-process into the measured Y52s image
+        run: |
+          set -e
+          python3 "$GITHUB_WORKSPACE/build/postprocess_ci12.py" \
+            "$TWRP_WORK/out/target/product/k6853v1_64_6360/recovery.img" \
+            --repo "$GITHUB_WORKSPACE"
+          ls -lh "$TWRP_WORK/out/target/product/k6853v1_64_6360/recovery.img"
+
+      - name: Save ccache
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: /mnt/ccache
+          key: ${{ steps.ccache-restore.outputs.cache-primary-key }}
+
+      - name: Verify the produced image
+        run: |
+          IMG="$TWRP_WORK/out/target/product/k6853v1_64_6360/recovery.img"
+          python3 - "$IMG" <<'PY'
+          import sys, struct, hashlib, gzip
+          b = open(sys.argv[1], 'rb').read()
+          assert b[:8] == b'ANDROID!' and len(b) == 100663296
+          v = struct.unpack_from('<10I', b, 8)
+          print('header_version', v[8], 'page', v[7],
+                'os_version=0x%08x' % v[9],
+                'kernel', v[0], 'ramdisk', v[2])
+          assert v[9] == 0x14000172
+          f = b[-64:]
+          assert f[:4] == b'AVBf'
+          vbo = struct.unpack_from('>Q', f, 20)[0]
+          vbs = struct.unpack_from('>Q', f, 28)[0]
+          vb = b[vbo:vbo+vbs]
+          assert vb[:4] == b'AVB0' and b'2019-06-06' in vb
+          print('official vivo vbmeta', vbs, 'B at 0x%x' % vbo)
+          # user999 patch must be inside the compiled ramdisk
+          page, hsz = v[7], struct.unpack_from('<I', b, 1644)[0]
+          pg = lambda n: ((n + page - 1) // page) * page
+          off = pg(hsz) + pg(v[0])
+          d = gzip.decompress(b[off:off+v[2]])
+          assert b'Write_Owner_Auth_Token' in d or b'y52s: owner auth token written' in d, \
+              'user999 patch marker missing from ramdisk'
+          assert b'PD2057' in d, 'PD2057 props missing'
+          print('user999 patch marker + PD2057 props present')
+          print('SHA256', hashlib.sha256(b).hexdigest())
+          PY
+
+      - name: Upload recovery.img
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: y52s-twrp121-recovery
+          path: |
+            /mnt/twrp/out/target/product/k6853v1_64_6360/recovery.img
+            /mnt/twrp/out/target/product/k6853v1_64_6360/recovery.img.sha256
+          if-no-files-found: warn
+          retention-days: 30
+          compression-level: 6
+
+      - name: Build summary
+        if: always()
+        run: |
+          echo "### y52s TWRP 12.1 (Y73s tree)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- manifest: \`$BRANCH\` / lunch: \`$LUNCH_TARGET\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- patches: 0002/0003/0004/0006 + 0007 (user999) + MTP default off" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Y52s kernel/dtb, PD2057 touch firmware, official vivo vbmeta" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          ccache -s >> "$GITHUB_STEP_SUMMARY" 2>&1 || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

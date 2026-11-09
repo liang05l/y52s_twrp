@@ -36,15 +36,11 @@
 name: Build TWRP 11 for vivo Y52s
 
 on:
+  # twrp-11 was PROVEN UNUSABLE on this device: its own keystore SIGABRTs and
+  # fscrypt_initialize_systemwide_keys() always fails (run 42616212138).
+  # Keep this workflow as an ARCHIVE, manual dispatch only -- never auto-run.
+  # The active build line is .github/workflows/build-twrp12.yml.
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      # Only device-tree / patch changes need a rebuild. Workflow-only edits
-      # must NOT auto-trigger another 30-60 min sync + 33 min compile.
-      - 'device/vivo/y52s/**'
-      - 'patches/twrp11/**'
-      - 'build/ci_hybrid.py'
 
 # A second manual run must not fight the previous one for the release.
 concurrency:

@@ -1,0 +1,13 @@
+--- a/data.cpp
++++ b/data.cpp
+@@ -926,7 +926,9 @@
+ #endif
+ #ifdef TW_HAS_MTP
+ 	mConst.SetValue("tw_has_mtp", "1");
+-	mPersist.SetValue("tw_mtp_enabled", "1");
++	/* y52s: do not start MTP before the FBE password is entered, otherwise the
++	 * PC caches encrypted (garbled) filenames. MTP stays available in Mount. */
++	mPersist.SetValue("tw_mtp_enabled", "0");
+ 	mPersist.SetValue("tw_mtp_debug", "0");
+ #else
+ 	LOGINFO("TW_EXCLUDE_MTP := true\n");

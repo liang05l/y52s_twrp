@@ -61,3 +61,9 @@ reference/y52s_official_recovery.img
 .cache/
 flash/probe_u999_spblob.sh
 flash/probe_u999_system.sh
+!build/prepare_ci12_tree.py
+!build/apply_ci12_patches.sh
+!build/postprocess_ci12.py
+!patches/bootable_recovery_12.1/
+!patches/bootable_recovery_12.1/*.patch
+!reference/y73s/patches/

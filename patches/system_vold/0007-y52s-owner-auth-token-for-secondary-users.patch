@@ -105,12 +105,10 @@
  bool Decrypt_User_Synth_Pass(const userid_t user_id, const std::string& Password) {
  	printf("Attempting to decrypt user's synthetic password\n");
  	bool retval = false;
-@@ -1111,7 +1209,17 @@
- 				printf("gatekeeper verification failed (ret=%d)\n", ret);
+@@ -1112,6 +1210,16 @@
  				return Free_Return(retval, weaver_key, &pwd);
  			}
--			printf("[SECDIS] Gatekeeper verification succeeded\n");
-+			printf("[SECDIS] Gatekeeper verification succeeded\n");
+ 			printf("[SECDIS] Gatekeeper verification succeeded\n");
 +
 +			// y52s: secondary users (e.g. vivo DOUBLE_APP user 999) keep their
 +			// synthetic-password key in the OWNER's keystore namespace and it is
