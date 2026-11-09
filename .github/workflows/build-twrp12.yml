@@ -213,8 +213,10 @@ jobs:
           pg = lambda n: ((n + page - 1) // page) * page
           off = pg(hsz) + pg(v[0])
           d = gzip.decompress(b[off:off+v[2]])
+          assert b'y52s: scrypt password token' in d, \
+              'user999 AOSP default-password scrypt patch marker missing from ramdisk'
           assert b'y52s: reusing owner auth token' in d, \
-              'user999 owner-token-reuse patch marker missing from ramdisk'
+              'user999 owner-token fallback marker missing from ramdisk'
           assert b'PD2057' in d, 'PD2057 props missing'
           assert b'android.hardware.keymaster@4.0.so' in d, \
               'keymaster 4.0 HIDL runtime lib missing from ramdisk'

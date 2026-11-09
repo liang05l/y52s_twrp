@@ -1,45 +1,87 @@
 --- a/Decrypt.cpp
 +++ b/Decrypt.cpp
-@@ -1117,6 +1117,52 @@
+@@ -970,20 +970,30 @@
+ 	// printf("Password: '%s'\n", Password.c_str());
+ 	// The password token is the password scrypted with the parameters from the password data file
+ 	unsigned char password_token[PASSWORD_TOKEN_SIZE];
+-	if (Password != "!") {
+-		if (!Get_Password_Data(spblob_path, handle_str, &pwd)) {
+-			printf("Failed to Get_Password_Data\n");
+-			return Free_Return(retval, weaver_key, &pwd);
+-		}
+-		printf("fscrypt::GetPassword_Token\n");
+-		if (!Get_Password_Token(&pwd, Password, &password_token[0])) {
+-			printf("Failed to Get_Password_Token\n");
+-			return Free_Return(retval, weaver_key, &pwd);
+-		}
+-	} else {
++	memset(password_token, 0, PASSWORD_TOKEN_SIZE);
++	/* y52s -- AOSP10 SyntheticPasswordManager.java (android-10.0.0_r1):
++	 *   DEFAULT_PASSWORD = "default-password"                     (16 bytes)
++	 *   computePasswordToken(credential, pwd) = scrypt(credential,
++	 *       pwd.salt, 1<<scryptN, 1<<scryptR, 1<<scryptP, 32)
++	 * TWRP's "!" branch used to memcpy those 16 bytes verbatim into a
++	 * 32-byte password_token (leaving 16 bytes of uninitialised stack) and
++	 * skipped Get_Password_Data() entirely. For a password-less profile such
++	 * as vivo DOUBLE_APP user 999 that yields a WRONG application_id and NO
++	 * gatekeeper handle. Always derive through scrypt with THIS user's
++	 * PasswordData, using the AOSP default credential for "!". */
++	const std::string credential =
++		(Password == "!") ? std::string("default-password") : Password;
++	if (Password == "!") {
+ 		android::keystore::copySqliteDb(); // early copy db for keystore
+-		std::string defpassword = "default-password";
+-		memcpy(password_token, defpassword.data(), defpassword.length());
++	}
++	if (!Get_Password_Data(spblob_path, handle_str, &pwd)) {
++		printf("Failed to Get_Password_Data\n");
++		return Free_Return(retval, weaver_key, &pwd);
++	}
++	printf("y52s: scrypt password token (credential_len=%zu)\n", credential.size());
++	if (!Get_Password_Token(&pwd, credential, &password_token[0])) {
++		printf("Failed to Get_Password_Token\n");
++		return Free_Return(retval, weaver_key, &pwd);
+ 	}
+ 	// output_hex(&password_token[0], PASSWORD_TOKEN_SIZE);printf("\n");
+ 	if (Is_Weaver(spblob_path, handle_str)) {
+@@ -1053,7 +1063,13 @@
+ 		}
+ 		memcpy((void*)&application_id[0], (void*)&password_token[0], PASSWORD_TOKEN_SIZE);
+ 		memcpy((void*)&application_id[PASSWORD_TOKEN_SIZE], secdiscardable, SHA512_DIGEST_LENGTH);
+-		if (Password != "!") {
++		/* y52s -- AOSP unwrapPasswordBasedSyntheticPassword() calls
++		 * gatekeeper.verifyChallenge(fakeUid(userId), 0, pwd.passwordHandle,
++		 * passwordTokenToGkInput(pwdToken)) UNCONDITIONALLY, even for
++		 * DEFAULT_PASSWORD users. TWRP skipped it for "!", so a password-less
++		 * profile never got its OWN auth token: its SP key is bound to the
++		 * profile SID and keymaster answered -26. Run it for all users. */
++		if (Password != "!" || user_id != 0) {
+ 			int ret = -1;
+ 			bool request_reenroll = false;
+ 			android::sp<android::hardware::gatekeeper::V1_0::IGatekeeper> gk_device;
+@@ -1109,14 +1125,33 @@
+ 			free(gk_pwd_token);
+ 			if (!hwRet.isOk() || ret != 0) {
+ 				printf("gatekeeper verification failed (ret=%d)\n", ret);
+-				return Free_Return(retval, weaver_key, &pwd);
++				/* y52s: for a secondary user keep going so unwrap still runs
++				 * with the owner-token fallback and leaves a complete log. */
++				if (user_id == 0)
++					return Free_Return(retval, weaver_key, &pwd);
++				printf("y52s: profile verify failed, continuing to unwrap\n");
++			} else {
++				printf("[SECDIS] Gatekeeper verification succeeded\n");
+ 			}
+-			printf("[SECDIS] Gatekeeper verification succeeded\n");
+ 		}
+ 	}
  	// Now we will handle https://android.googlesource.com/platform/frameworks/base/+/android-8.0.0_r23/services/core/java/com/android/server/locksettings/SyntheticPasswordManager.java#816
  	// Plus we will include the last bit that computes the disk decrypt key found in:
  	// https://android.googlesource.com/platform/frameworks/base/+/android-8.0.0_r23/services/core/java/com/android/server/locksettings/SyntheticPasswordManager.java#153
-+	/* =======================================================================
-+	 * y52s / PD2057 -- owner auth token for secondary / DOUBLE_APP users.
-+	 *
-+	 * MEASURED ON DEVICE (2026-11-09, full /tmp/recovery.log, sanitized):
-+	 *   user 0 : [SECDIS] Auth token written to /auth_token (69 bytes)
-+	 *            [SPBLOB] Parsed auth token ... [Keymaster] begin (authToken)
-+	 *            Successfully generated disk decryption secret key
-+	 *            User 0 Decrypted Successfully!
-+	 *   user 999 attempt #1 (entered PIN):
-+	 *            using secdis to decrypt spblob
-+	 *            gatekeeper verification failed (ret=-1)   <-- fakeUid(999)
-+	 *   user 999 attempt #2 (default password "!"):
-+	 *            [SPBLOB] Found key file:
-+	 *              /data/misc/keystore/user_0/1000_USRPKEY_synthetic_password_
-+	 *              c977db9a6356c1ad                        <-- OWNER namespace
-+	 *            [Keymaster] begin: km_error=-26          <-- no auth token
-+	 *            failed to unwrapSyntheticPasswordBlob
-+	 *
-+	 * The profile's synthetic-password key is stored in the OWNER's keystore
-+	 * namespace and is bound to the OWNER's gatekeeper SID. TWRP's
-+	 * PartitionManager::Decrypt_Device() tries every secondary user twice:
-+	 * first with the entered PIN (gatekeeper verify(fakeUid(999)) fails,
-+	 * because the profile has no independent LSKF), then with "!", which
-+	 * SKIPS the whole gatekeeper block and leaves auth_token_len == 0.
-+	 * unwrapSyntheticPasswordBlob() then calls keymaster begin() without an
-+	 * auth token and gets KEY_USER_NOT_AUTHENTICATED (-26).
-+	 *
-+	 * The earlier 0007 hook was placed AFTER "Gatekeeper verification
-+	 * succeeded" -- a branch user 999 never reaches, so it never ran.
-+	 *
-+	 * Fix: immediately before unwrap, for a secondary user with no token,
-+	 * reuse the OWNER's 69-byte HW_AUTH_TOKEN that user 0 wrote to
-+	 * /auth_token. application_id is deliberately NOT changed: on the "!"
-+	 * attempt TWRP already derives it from "default-password" + the profile's
-+	 * own secdiscardable, which is the correct binding for a no-LSKF profile.
-+	 * ======================================================================= */
++	/* y52s: if the profile gatekeeper verify still failed, fall back to the
++	 * owner's 69-byte HW_AUTH_TOKEN that user 0 wrote to /auth_token.
++	 * (18.14 proved the owner token alone is NOT sufficient, so this is only
++	 * a last-resort diagnostic path; the real fix is scrypt + verify above.) */
 +	if (user_id != 0 && auth_token_len == 0) {
 +		struct stat st;
 +		if (stat("/auth_token", &st) == 0 && st.st_size >= 69) {
