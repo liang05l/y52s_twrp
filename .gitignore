@@ -108,3 +108,8 @@ build/ci12v6/*.img
 !build/ci12v9/
 build/ci12v9/*.img
 !build/ci12v9/recovery.img.sha256
+!device/vivo/y52s/prebuilt/keystore_libs/
+!device/vivo/y52s/prebuilt/keystore_libs/*.so
+!flash/probe_strategy_result.sh
+!flash/probe_after_strategies.sh
+!flash/probe_keystore_libs.sh

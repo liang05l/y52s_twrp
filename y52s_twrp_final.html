@@ -1339,6 +1339,40 @@ adb shell 'twrp decrypt &lt;PIN&gt; 999'          # 或直接在 TWRP 终端操�
 <p>若 17 条全失败，日志已把每种 token 解释的错误码全部列出，可据此在本机用 <code>build/repack_ramdisk.py</code> 补库 / 改 rc 后本地重打包，仍不占用云端编译。回退 <code>build/recovery.img</code>（<code>a3855ed4…</code>）始终保留；全程未 format / wipe。</p>
 </div>
 
+<h3>18.24 14:00 追加 — 17 条策略全 <code>-26</code>：方向证伪，真正根因定位到 token 注册链断裂</h3>
+<div class="block">
+<p><strong>决定性结果</strong>：策略 0..16（4 个独立字节解释维度的全部 16 种组合 + 无 token 的 <code>begin()</code>）<strong>全部返回 <code>-26</code>，错误码一字不差</strong>。日志示例：</p>
+<pre>y52s: raw token fields c=0x0 u=0xbbc2828e49e6dbc8 a=0x0 ty=0x1000000 ts=0xca82033000000000
+y52s: strategy 0  [be64=0 be32=0 ts_alt=0 u_alt=0] userId=0xbbc2828e49e6dbc8 type=16777216 ts=... -> -26
+y52s: strategy 1  [be64=1 be32=0 ts_alt=0 u_alt=0] userId=0xc8dbe6498e82c2bb type=16777216 ts=230090 -> -26
+y52s: strategy 3  [be64=1 be32=1 ts_alt=0 u_alt=0] userId=0xc8dbe6498e82c2bb type=1 ts=230090 -> -26
+...
+y52s: strategy 16: begin() WITHOUT auth token -> -26
+y52s: all strategies exhausted for tied-profile credential</pre>
+<p>连「完全不带 token」也是 <code>-26</code>，说明 Trustonic keymaster 对这个 auth-bound key <strong>不是</strong>在解析 <code>begin()</code> 传入的 <code>HardwareAuthToken</code> 字段，而是查<strong>内部 auth token 表</strong>——表里是空的。此前所有轮次（机主 token 复用、字节序、timestamp、scrypt、SID 假设）都打偏了，本轮穷举正式证伪这一整条方向。</p>
+
+<h4>18.24.1 源码级证据：token 注册步骤在 12.1 补丁里被丢掉</h4>
+<table>
+  <tr><th>来源</th><th>事实</th></tr>
+  <tr><td>TWRP 11 <code>unwrapSyntheticPasswordBlob()</code>:622</td><td><code>if (auth_token_len &gt; 0) { property_set("ctl.start", "keystore_auth"); }</code> —— 解密前把 token 注册进 keystore</td></tr>
+  <tr><td>Y73s 0006 补丁注释</td><td>明写「The keystore refuses root user to supply auth tokens directly, so we write the auth token to a file and <strong>use keystore_auth service</strong>」</td></tr>
+  <tr><td>打完补丁的 12.1 <code>Decrypt.cpp</code></td><td><strong>没有任何 <code>ctl.start</code></strong>，只剩写 <code>/auth_token</code> 的注释；rc 里 <code>keystore_auth</code> 是 <code>disabled</code> 且无 trigger</td></tr>
+  <tr><td>AOSP <code>LockSettingsService.java:1560</code></td><td>该 key 是 <code>setUserAuthenticationRequired(true)</code> + <code>setUserAuthenticationValidityDurationSeconds(30)</code>，必须查认证表</td></tr>
+  <tr><td>Keymaster 4.0 HAL</td><td><code>begin(..., HardwareAuthToken authToken)</code> 是唯一接口，<strong>全文 0 处 <code>addAuthToken</code></strong>（3.0 才有）；所以注册只能由 <code>keystore_auth</code> → <code>android.security.keystore</code> 服务完成</td></tr>
+</table>
+<p>主用户 0 能解密，是因为它的 SP key 不要求该认证；999 的 tied-profile key 与 SP key 都要求，所以必然 <code>-26</code>。<strong>这才是根因。</strong></p>
+
+<h4>18.24.2 零编译验证走到哪一步（全程只读挂载 + tmpfs 推库，未刷入/未重启/未改分区）</h4>
+<ul>
+  <li><code>keystore_auth</code> 原本 <code>CANNOT LINK: libkeystore_aidl.so not found</code>；<code>keystore</code> 服务 <code>exit 1</code> 是缺 <code>vendor.vivo.hardware.wifi.keystore@1.0.so</code>。</li>
+  <li>从 TWRP 11 镜像提取 <code>libkeystore_aidl.so</code>(205824 B)、<code>libkeystore_binder.so</code>(111568 B)、<code>libkeystore_parcelables.so</code>(29312 B)；只读挂载 <code>/dev/block/mapper/vendor</code> 取回 <code>vendor.vivo.hardware.wifi.keystore@1.0.so</code>(79936 B)。四者已存 <code>device/vivo/y52s/prebuilt/keystore_libs/</code>。</li>
+  <li>推入 ramdisk 后 <code>keystore_auth</code> <strong>能链接了</strong>，但报 <code>error: could not connect to keystore service</code>；<code>keystore</code> 服务仍缺 <code>libwifikeystorehal.so</code> 与 <code>libwifikeystorehalext.so</code>。</li>
+  <li>这两个库只可能在原厂 <code>system</code> 逻辑分区；<code>/dev/block/mapper/system</code>(dm-2) 在 TWRP 里无法挂载，vendor/product 分区宽搜均无 → <strong>零编译补库链在此断开</strong>。</li>
+  <li>另注：<code>keystore_auth</code> 会 <code>unlink("/auth_token")</code> 并写 <code>/auth_error</code>；本次它消费掉了当前会话的 <code>/auth_token</code>（主用户 0 已解密、CE key 已入内核，不影响已解密数据），下次输 PIN 会重新生成。</li>
+</ul>
+<p><strong>结论</strong>：继续修需要让 <code>keystore</code> 服务跑起来并把 <code>ctl.start keystore_auth</code> 加回解密流程。这至少需要一轮源码编译，且要先拿到原厂 system 分区里的两个 wifi keystore HAL 库。本次<strong>没有</strong>擅自触发编译、刷入或重启；设备仍是 TWRP、分区 <code>373f2c64…</code>、主用户 0 已解密、BCB 全 0，回退 <code>a3855ed4…</code> 保留。</p>
+</div>
+
 <div class="foot">唯一入口：本文件。配置 <code>device/vivo/y52s/</code>，上游对照 <code>reference/</code>，
 证据 <code>device_dump/</code>，命令刷 <code>flash/</code>，TWRP 11 补丁 <code>patches/twrp11/</code>（存档），
 12.1 解密补丁 <code>patches/system_vold/</code>，CI 流水线 <code>build/{prepare_ci12_tree.py,apply_ci12_patches.sh,postprocess_ci12.py}</code>。未列出来源的参数保持 PENDING。</div>
