@@ -105,3 +105,6 @@ build/ci12v6/*.img
 !flash/probe_keystore_auth.sh
 !flash/probe_twrp_readability.sh
 !flash/probe_999_data_paths.sh
+!build/ci12v9/
+build/ci12v9/*.img
+!build/ci12v9/recovery.img.sha256

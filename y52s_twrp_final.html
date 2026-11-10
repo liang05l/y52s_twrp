@@ -1328,6 +1328,17 @@ y52s: tied-profile keymaster begin failed: -26
 python build/repack_ramdisk.py INPUT.img --list 'system/bin/keystore*'</pre>
 <p>往返测试：把已验证镜像的 rc 原样重新写入，输出 SHA256 = <code>a3855ed4…</code>，<strong>与输入字节级完全一致</strong>（815 条目、os_version、kernel、官方 vbmeta 全同）。因此补 <code>libkeystore_aidl.so</code> / vivo wifi keystore 库、改 rc trigger、调 props 都走本地，不再占云端编译。</p>
 
+<h3>18.23 05:43 追加 — 策略表镜像已构建、刷入（编译一次，之后不再编译）</h3>
+<div class="block">
+<p><strong>run <code>42761319888</code></strong>：编译与打包均成功，job 被标 <code>failure</code> 只是「Verify the produced image」里残留一条旧断言（还在找 <code>tied-profile credential recovered</code>，新版日志改为 <code>y52s: STRATEGY n SUCCEEDED</code>）。artifact 已正常上传，<strong>直接下载使用，没有重编译</strong>；该断言已修正。</p>
+<p>产物 <code>build/ci12v9/recovery.img</code> = <code>373f2c64…</code>（96 MiB）。离线校验全绿：<code>y52s: STRATEGY</code>、<code>y52s_km_only</code>、<code>y52s: raw token fields</code>、<code>begin() WITHOUT auth token</code> 均编译进 <code>system/bin/recovery</code> 与 <code>system/lib64/libtar.so</code>；官方 vivo vbmeta（<code>4bdf3ccd…</code> / <code>2019-06-06</code>）、<code>os_version=0x14000172</code>、3696 条目、14 触摸固件、41 trustlet、keymaster@4.0 库、MTP 开关不变；<strong>全文无 <code>__builtin_bswap64</code></strong>（主用户 0 路径零回归）。</p>
+<p>刷入在 TWRP 内完成（<code>push</code> 2.5 s + <code>dd</code> 0.7 s），分区回读 <code>373f2c64…</code> 一致，清 BCB 后重启。重启后实测：运行中二进制三个策略标记各命中 1 次、<code>installKeyLegacy: SUCCESS</code>、密码页 <code>decrypt_pin</code> 就绪、BCB 全 0、<code>sys.usb.config=adb</code>、<code>/tmp/y52s_km_only</code> 不存在（即默认自动跑完 17 条策略）。</p>
+<p><strong>唯一剩一步：在 TWRP 屏幕输一次锁屏 PIN。</strong>主用户 0 解密后，tied-profile helper 会依次打印 17 条策略的字段名与 <code>begin</code> 错误码；第一条成功的策略直接解出 80 字符随机密码并继续完成 999 解密。无论结果如何，<strong>后续验证都不需要再编译</strong>：</p>
+<pre>adb shell 'echo N > /tmp/y52s_km_only'     # N = 0..16，只跑指定策略
+adb shell 'twrp decrypt &lt;PIN&gt; 999'          # 或直接在 TWRP 终端操作</pre>
+<p>若 17 条全失败，日志已把每种 token 解释的错误码全部列出，可据此在本机用 <code>build/repack_ramdisk.py</code> 补库 / 改 rc 后本地重打包，仍不占用云端编译。回退 <code>build/recovery.img</code>（<code>a3855ed4…</code>）始终保留；全程未 format / wipe。</p>
+</div>
+
 <div class="foot">唯一入口：本文件。配置 <code>device/vivo/y52s/</code>，上游对照 <code>reference/</code>，
 证据 <code>device_dump/</code>，命令刷 <code>flash/</code>，TWRP 11 补丁 <code>patches/twrp11/</code>（存档），
 12.1 解密补丁 <code>patches/system_vold/</code>，CI 流水线 <code>build/{prepare_ci12_tree.py,apply_ci12_patches.sh,postprocess_ci12.py}</code>。未列出来源的参数保持 PENDING。</div>

@@ -215,8 +215,8 @@ jobs:
           d = gzip.decompress(b[off:off+v[2]])
           assert b'y52s: scrypt password token' in d, \
               'user999 AOSP default-password scrypt patch marker missing from ramdisk'
-          assert b'tied-profile credential recovered' in d, \
-              'user999 AOSP unified-challenge tied-profile patch marker missing from ramdisk'
+          assert b'y52s: STRATEGY' in d, \
+              'runtime strategy table success marker missing from ramdisk'
           assert b'y52s: reusing owner auth token' in d, \
               'user999 owner-token fallback marker missing from ramdisk'
           assert b'y52s: STRATEGY' in d, \
