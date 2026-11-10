@@ -27,6 +27,7 @@ VD="$REPO/reference/y73s/patches/system_vold"
 P7="$REPO/patches/system_vold/0007-y52s-owner-auth-token-for-secondary-users.patch"
 P8="$REPO/patches/system_vold/0008-y52s-fresh-owner-auth-token.patch"
 P9="$REPO/patches/system_vold/0009-y52s-u999-credential-and-auth-dump.patch"
+P10="$REPO/patches/system_vold/0010-y52s-twrp-only-auth-token-registration.patch"
 MTP="$REPO/patches/bootable_recovery_12.1/0001-y52s-mtp-default-off.patch"
 LINK="$REPO/patches/bootable_recovery_12.1/0002-y52s-keymaster-hidl-link.patch"
 
@@ -109,22 +110,32 @@ grep -q 'memcpy(&authToken.userId, p, 8); p += 8;' Decrypt.cpp \
   || fail "REGRESSION: upstream auth token parser was modified by 0008"
 echo "  0008 fresh-token patch OK"
 
-echo "  --- 0009 (definitive u999 credential + auth-set dump) ---"
+echo "  --- 0009 (auth-set value dump) ---"
 git apply --check "$P9" || fail "0009 does not apply"
 git apply "$P9" || fail "0009 apply failed"
-grep -q 'y52s: using supplied user-999 credential' Decrypt.cpp \
-  || fail "0009 missing: user-999 credential file fast path"
-grep -q '/cache/recovery/u999_cred' Decrypt.cpp \
-  || fail "0009 missing: persistent credential path"
 grep -q 'dump_auth_set' Decrypt.cpp \
   || fail "0009 missing: full KeyParameter dump for SID decoding"
+
+echo "  --- 0010 (TWRP-ONLY auth-token registration, Keymaster 3.0) ---"
+git apply --check "$P10" || fail "0010 does not apply"
+git apply "$P10" || fail "0010 apply failed"
+grep -q 'KM3 addAuthToken' Decrypt.cpp \
+  || fail "0010 missing: Keymaster 3.0 addAuthToken registration"
+grep -q 'android/hardware/keymaster/3.0/IKeymasterDevice.h' Decrypt.cpp \
+  || fail "0010 missing: Keymaster 3.0 HIDL header"
+grep -q 'TEE auth-token registration' Decrypt.cpp \
+  || fail "0010 missing: registration result logging"
+# The external credential hand-off was withdrawn per the TWRP-only constraint.
+if grep -q 'y52s: using supplied user-999 credential' Decrypt.cpp; then
+  fail "REGRESSION: external credential path must not be in a TWRP-only build"
+fi
 # Regression guards: upstream parser and no-bswap64 rule must still hold.
 grep -q 'memcpy(&authToken.userId, p, 8); p += 8;' Decrypt.cpp \
   || fail "REGRESSION: upstream auth token parser was modified"
 if grep -q '__builtin_bswap64' Decrypt.cpp; then
   fail "REGRESSION: __builtin_bswap64 breaks user 0 decryption"
 fi
-echo "  0009 OK (credential fast path + auth-set dump; regression guards pass)"
+echo "  0010 OK (TWRP-only; no system-state tool/dex/credential hand-off)"
 
 echo "=== bootable/recovery (MTP default off) ==="
 cd "$WORK/bootable/recovery"

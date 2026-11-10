@@ -1,0 +1,105 @@
+--- a/Decrypt.cpp
++++ b/Decrypt.cpp
+@@ -15,6 +15,8 @@
+  */
+ 
+ #include "Decrypt.h"
++#include <android/hardware/keymaster/3.0/IKeymasterDevice.h>
++#include <cutils/properties.h>
+ #include "FsCrypt.h"
+ #include <fscrypt/fscrypt.h>
+ 
+@@ -1000,6 +1002,48 @@
+ 		return "";
+ 	}
+ 
++	/* y52s / PD2057 -- TWRP-ONLY auth-token registration.
++	 *
++	 * TWRP 11 unwrapSyntheticPasswordBlob():622 had:/n	 *     property_set("ctl.start", "keystore_auth");
++	 * which hands the freshly Gatekeeper-signed 69-byte hw_auth_token_t to
++	 * keystore, and from there into the TEE auth-token table. Y73s 0006
++	 * deleted it and switched to a DIRECT Keymaster 4.0 HIDL begin().
++	 * Keymaster 4.0 has no addAuthToken (3.0 does), so the table stays
++	 * empty and every begin() on an auth-bound key returns -26 regardless
++	 * of how the HardwareAuthToken bytes are interpreted. That is why all
++	 * 17 runtime strategies, fresh tokens and keystore rebuilding failed.
++	 *
++	 * Fix it INSIDE recovery: register the raw token via the Keymaster 3.0
++	 * HAL (the @3.0 client lib is already in the ramdisk), then keep the
++	 * existing begin() strategy table. No system state, no dex, no service
++	 * manager, no credential hand-off -- TWRP does 100% of the decryption.
++	 */
++	namespace km3 = ::android::hardware::keymaster::V3_0;
++	auto register_auth_token = [](const std::string& raw_token) {
++		/* Optional TWRP 11 native chain, runtime-selectable. */
++		std::string flag;
++		if (android::base::ReadFileToString("/tmp/y52s_use_ksauth", &flag) && !flag.empty()) {
++			property_set("ctl.start", "keystore_auth");
++			printf("y52s: ctl.start keystore_auth issued\n");
++		}
++		android::sp<km3::IKeymasterDevice> dev = km3::IKeymasterDevice::getService();
++		if (dev == nullptr) {
++			printf("y52s: KM3 IKeymasterDevice service unavailable\n");
++			return false;
++		}
++		::android::hardware::hidl_vec<uint8_t> raw;
++		raw.resize(raw_token.size());
++		memcpy(raw.data(), raw_token.data(), raw_token.size());
++		auto ret = dev->addAuthToken(raw);
++		if (!ret.isOk()) {
++			printf("y52s: KM3 addAuthToken transport error: %s\n", ret.description().c_str());
++			return false;
++		}
++		int rc = (int)static_cast<km3::ErrorCode>(ret);
++		printf("y52s: KM3 addAuthToken rc=%d (%zu bytes)\n", rc, raw_token.size());
++		return rc == 0;
++	};
++
+ 	std::string tok;
+ 	if (!android::base::ReadFileToString("/auth_token", &tok) || tok.size() < 69) {
+ 		printf("y52s: no owner auth token for tied-profile key\n");
+@@ -1071,6 +1115,9 @@
+ 	printf("y52s: token ts_be=%llu boottime_now_ms=%llu delta_ms=%lld AUTH_TIMEOUT=30000\n",
+ 	       (unsigned long long)swap64(ts_raw), (unsigned long long)boot_ms,
+ 	       (long long)((int64_t)boot_ms - (int64_t)swap64(ts_raw)));
++
++	bool token_registered = register_auth_token(tok);
++	printf("y52s: TEE auth-token registration %s\n", token_registered ? "OK" : "FAILED");
+ 
+ 	int only = -1;
+ 	std::string only_str;
+@@ -1473,34 +1520,6 @@
+ 	 * owner's PIN. Recover its AOSP tied-profile random credential and use
+ 	 * that instead; fall back to the supplied password if unavailable. */
+ 	if (user_id != 0) {
+-		/* y52s: DEFINITIVE PATH. The tied profile is protected by an
+-		 * auth-bound keystore key whose SID does not match the owner token,
+-		 * which is why every begin() returns -26. But user 999 has its own
+-		 * LSKF (an AOSP random 80-char password) that Android decrypts in
+-		 * LockSettingsService.getDecryptedPasswordForTiedProfile(). If that
+-		 * credential is supplied here, Decrypt_User_Synth_Pass() runs the
+-		 * SAME code path already proven on user 0: gatekeeper verify for
+-		 * fakeUid(999) succeeds, yielding a 999-SID token that unwraps the
+-		 * 999 SP key and installs its CE key. No auth-bound profile key,
+-		 * no byte guessing, no further build needed.
+-		 * Write P to /tmp/y52s_u999_cred or /cache/recovery/u999_cred. */
+-		std::string supplied_cred;
+-		const char* cred_paths[] = {"/tmp/y52s_u999_cred",
+-		                             "/cache/recovery/u999_cred"};
+-		for (const char* cp : cred_paths) {
+-			if (android::base::ReadFileToString(cp, &supplied_cred) &&
+-			    supplied_cred.size() >= 8) break;
+-			supplied_cred.clear();
+-		}
+-		if (!supplied_cred.empty()) {
+-			while (!supplied_cred.empty() &&
+-			       (supplied_cred.back() == '\n' || supplied_cred.back() == '\r'))
+-				supplied_cred.pop_back();
+-			printf("y52s: using supplied user-999 credential (%zu bytes)\n",
+-			       supplied_cred.size());
+-			if (Decrypt_User_Synth_Pass(user_id, supplied_cred)) return true;
+-			printf("y52s: supplied credential did not decrypt, falling back\n");
+-		}
+ 		/* y52s: prefer the credential recovered while the owner token was
+ 		 * fresh. A manual `twrp decrypt <PIN> 999` with user 0 already done
+ 		 * has no cache, so fall back to reading /auth_token (which will be
