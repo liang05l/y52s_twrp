@@ -212,8 +212,10 @@ echo "  0013 OK (SP-derived SID token, AOSP uid domains, no hardcoded paths)"
 echo "  --- 0014 (mask the Keymaster tag kind before comparing) ---"
 patch -p1 --dry-run -N < "$P14" >/dev/null || fail "0014 does not apply"
 patch -p1 -N -s < "$P14" || fail "0014 apply failed"
-grep -q '& 0xFFFFFFFu' Decrypt.cpp \
+grep -q '& 0x0FFFFFFFu' Decrypt.cpp \
   || fail "0014 missing: tag kind nibble is not masked off"
+[ "$(grep -c '& 0x0FFFFFFFu' Decrypt.cpp)" -ge 2 ] \
+  || fail "0014 incomplete: expect the mask in both the parser and the dump"
 grep -q 'tag=0x%08x id=%u val=' Decrypt.cpp \
   || fail "0014 missing: masked tag id in the authorization dump"
 grep -q 'key demands auth but no SID was parsed' Decrypt.cpp \
