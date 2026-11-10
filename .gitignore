@@ -92,3 +92,6 @@ build/ci12v4/*.img
 !reference/aosp10/LockSettingsStorage.java
 !reference/aosp10/LockPatternUtils.java
 !reference/aosp10/SyntheticPasswordCrypto.java
+!build/ci12v5/
+build/ci12v5/*.img
+!build/ci12v5/recovery.img.sha256
