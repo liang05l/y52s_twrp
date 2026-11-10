@@ -216,11 +216,15 @@ jobs:
           assert b'y52s: scrypt password token' in d, \
               'user999 AOSP default-password scrypt patch marker missing from ramdisk'
           assert b'y52s: STRATEGY' in d, \
-              'runtime strategy table success marker missing from ramdisk'
+              'runtime keymaster strategy table marker missing from ramdisk'
           assert b'y52s: reusing owner auth token' in d, \
               'user999 owner-token fallback marker missing from ramdisk'
-          assert b'y52s: STRATEGY' in d, \
-              'runtime keymaster strategy table marker missing from ramdisk'
+          assert b'with FRESH owner token' in d, \
+              '0008 fresh-token hook missing from ramdisk'
+          assert b'no fresh cached credential' in d, \
+              '0008 Decrypt_User cache fallback missing from ramdisk'
+          assert b'AUTH_TIMEOUT=30000' in d, \
+              '0008 monotonic-clock diagnostic missing from ramdisk'
           assert b'y52s_km_only' in d, \
               'runtime strategy override marker missing from ramdisk'
           assert b'__builtin_bswap64' not in d, \

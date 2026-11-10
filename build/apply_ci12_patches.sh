@@ -25,6 +25,7 @@ REPO="${GITHUB_WORKSPACE:?GITHUB_WORKSPACE required}"
 WORK="${TWRP_WORK:?TWRP_WORK required}"
 VD="$REPO/reference/y73s/patches/system_vold"
 P7="$REPO/patches/system_vold/0007-y52s-owner-auth-token-for-secondary-users.patch"
+P8="$REPO/patches/system_vold/0008-y52s-fresh-owner-auth-token.patch"
 MTP="$REPO/patches/bootable_recovery_12.1/0001-y52s-mtp-default-off.patch"
 LINK="$REPO/patches/bootable_recovery_12.1/0002-y52s-keymaster-hidl-link.patch"
 
@@ -87,6 +88,25 @@ if grep -q '__builtin_bswap64' Decrypt.cpp; then
   fail "REGRESSION: any bswap64 on auth token breaks user 0 decryption"
 fi
 echo "  user999 patch OK (runtime strategy table 0..16, upstream parser untouched)"
+
+echo "  --- 0008 (fresh owner auth token, 30 s AUTH_TIMEOUT window) ---"
+git apply --check "$P8" || fail "0008 does not apply"
+git apply "$P8"         || fail "0008 apply failed"
+grep -q 'cached tied-profile credential (%zu bytes) with FRESH owner token' Decrypt.cpp \
+  || fail "0008 missing: tied-profile decrypt at token-signing time"
+grep -q 'g_tied_profile_attempted' Decrypt.cpp \
+  || fail "0008 missing: single-shot guard"
+grep -q 'upstream_parse' Decrypt.cpp \
+  || fail "0008 missing: upstream hw_auth_token_t parser as strategy 0"
+grep -q 'AUTH_TIMEOUT=30000' Decrypt.cpp \
+  || fail "0008 missing: monotonic-clock / auth-timeout diagnostic"
+grep -q 'no fresh cached credential' Decrypt.cpp \
+  || fail "0008 missing: Decrypt_User cache fallback"
+# The whole point of 0008 is timing, not byte reinterpretation. The upstream
+# parser and the no-bswap64 regression guard above must still hold.
+grep -q 'memcpy(&authToken.userId, p, 8); p += 8;' Decrypt.cpp \
+  || fail "REGRESSION: upstream auth token parser was modified by 0008"
+echo "  0008 fresh-token patch OK"
 
 echo "=== bootable/recovery (MTP default off) ==="
 cd "$WORK/bootable/recovery"

@@ -1,0 +1,98 @@
+--- a/Decrypt.cpp
++++ b/Decrypt.cpp
+@@ -26,6 +26,7 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <sys/stat.h>
++#include <time.h>
+ #include <sys/types.h>
+ 
+ #include <keyutils.h>
+@@ -1048,6 +1049,13 @@
+ 		(unsigned long long)c_raw, (unsigned long long)u_raw,
+ 		(unsigned long long)a_raw, (unsigned int)ty_raw,
+ 		(unsigned long long)ts_raw);
++	struct timespec boot_now;
++	clock_gettime(CLOCK_MONOTONIC, &boot_now);
++	uint64_t boot_ms = (uint64_t)boot_now.tv_sec * 1000ULL +
++	                   (uint64_t)boot_now.tv_nsec / 1000000ULL;
++	printf("y52s: token ts_be=%llu boottime_now_ms=%llu delta_ms=%lld AUTH_TIMEOUT=30000\n",
++	       (unsigned long long)swap64(ts_raw), (unsigned long long)boot_ms,
++	       (long long)((int64_t)boot_ms - (int64_t)swap64(ts_raw)));
+ 
+ 	int only = -1;
+ 	std::string only_str;
+@@ -1068,6 +1076,10 @@
+ 		const bool ts_alt = (strategy & 4) != 0;
+ 		const bool u_alt  = (strategy & 8) != 0;
+ 		const bool no_token = (strategy == 16);
++		/* strategy 0 is byte-for-byte the upstream parser that makes user 0
++		 * begin() succeed: challenge/userId/authenticatorId stay as memcpy,
++		 * authenticatorType is ntohl, timestamp is bswap64. */
++		const bool upstream_parse = (strategy == 0);
+ 
+ 		auto params = AuthorizationSetBuilder()
+ 			.Authorization(TAG_PURPOSE, KeyPurpose::DECRYPT)
+@@ -1086,8 +1098,10 @@
+ 			token.challenge       = sw64(c_raw,  be64);
+ 			token.userId          = sw64(u_raw,  (bool)(be64 ^ u_alt));
+ 			token.authenticatorId = sw64(a_raw,  be64);
+-			token.authenticatorType = static_cast<HAType>(be32 ? swap32(ty_raw) : ty_raw);
+-			token.timestamp       = sw64(ts_raw, (bool)(be64 ^ ts_alt));
++			token.authenticatorType = static_cast<HAType>(
++				(upstream_parse || be32) ? swap32(ty_raw) : ty_raw);
++			token.timestamp       = sw64(ts_raw,
++				(bool)(upstream_parse || (be64 ^ ts_alt)));
+ 			token.mac.resize(32);
+ 			memcpy(token.mac.data(), p + 37, 32);
+ 			printf("y52s: strategy %d [be64=%d be32=%d ts_alt=%d u_alt=%d] "
+@@ -1119,6 +1133,17 @@
+ 	printf("y52s: all strategies exhausted for tied-profile credential\n");
+ 	return "";
+ }
++
++/* y52s / PD2057 -- AOSP ties this profile key to a 30-second auth window
++ * (KeyProtection.setUserAuthenticationValidityDurationSeconds(30)).
++ * Keymaster 4.0 IKeymasterDevice.hal requires:/n *   authToken.timestamp + Tag::AUTH_TIMEOUT >= current secure timestamp
++ * where the secure timestamp is monotonic milliseconds since boot.
++ * TWRP used to run this decrypt in Decrypt_User(999), long after user 0
++ * signed the token -> KEY_USER_NOT_AUTHENTICATED (-26) for EVERY byte
++ * interpretation. Recover the credential while the token is fresh and
++ * cache it for the later Decrypt_User(999) call. */
++static std::string g_tied_profile_password;
++static bool g_tied_profile_attempted = false;
+ 
+ 
+ bool Is_Weaver(const std::string& spblob_path, const std::string& handle_str) {
+@@ -1333,6 +1358,14 @@
+ 				printf("y52s: profile verify failed, continuing to unwrap\n");
+ 			} else {
+ 				printf("[SECDIS] Gatekeeper verification succeeded\n");
++			/* y52s: /auth_token was JUST written by the callback above. Do the
++			 * auth-bound AES-GCM begin() now, while the 30 s window is open. */
++			if (user_id == 0 && !g_tied_profile_attempted) {
++				g_tied_profile_attempted = true;
++				g_tied_profile_password = Get_Tied_Profile_Password(999);
++				printf("y52s: cached tied-profile credential (%zu bytes) with FRESH owner token\n",
++				       g_tied_profile_password.size());
++			}
+ 			}
+ 		}
+ 	}
+@@ -1425,7 +1458,15 @@
+ 	 * owner's PIN. Recover its AOSP tied-profile random credential and use
+ 	 * that instead; fall back to the supplied password if unavailable. */
+ 	if (user_id != 0) {
+-		std::string tied = Get_Tied_Profile_Password(user_id);
++		/* y52s: prefer the credential recovered while the owner token was
++		 * fresh. A manual `twrp decrypt <PIN> 999` with user 0 already done
++		 * has no cache, so fall back to reading /auth_token (which will be
++		 * stale -- the diagnostic above explains why). */
++		std::string tied = g_tied_profile_password;
++		if (tied.empty()) {
++			printf("y52s: no fresh cached credential, falling back to /auth_token\n");
++			tied = Get_Tied_Profile_Password(user_id);
++		}
+ 		if (!tied.empty()) {
+ 			if (Decrypt_User_Synth_Pass(user_id, tied))
+ 				return true;
