@@ -1,0 +1,127 @@
+From: y52s recovery work
+Subject: [PATCH] y52s: mask the Keymaster tag kind off before comparing
+
+The tied-profile escrow key never even reached a token attempt: the boot log
+shows its authorization set does carry the SID,
+
+  tag=0xa00001f6 val=0x779b8423e32ee87
+
+but the parser compared the raw tag to the bare id 502 and therefore decided
+"this key carries no USER_SECURE_ID", printed "no token needed" and called
+begin() without one -- which Keymaster 4.0 answers with -26 every time.
+
+Keymaster returns each authorization tag with its kind nibble attached:
+KM_TAG_USER_SECURE_ID is an ULONG_REP (0xa0000000), USER_AUTH_TYPE an ENUM
+(0x10000000) and AUTH_TIMEOUT an ULONG (0x30000000).  Only the low 28 bits
+are the tag id, so mask with 0x0fffffff before comparing.  Same value, same
+key, no hardcoded SID - it simply was not being read.
+
+Because a silent "no SID" is indistinguishable from "no auth required", the
+dump now prints the masked id next to the raw tag, and a key that demands an
+auth timeout but yields no SID says so out loud instead of quietly trying
+without a token.
+
+Second fix, same root cause as the throttle seen on device (ret=14759): the
+per-profile credential recovery ran at gatekeeper time, before the synthetic
+password was cached, so minting the SID token recursed into a second unlock
+of the same user - a second gatekeeper verification per boot.  Recover the
+profiles once the SP is in hand instead, before CE storage is unlocked.
+
+Expected trace once this is right:
+  y52s: tied-profile key requires sid=0x779b8423e32ee87 type=3 auth_timeout=30s
+  y52s: sid token: ... carries sid=0x779b8423e32ee87 (key wants 0x779b8423e32ee87)
+  y52s: sid token: minted for sid=0x779b8423e32ee87 (user 0)
+  y52s: tied-profile credential recovered (80 bytes)
+
+---
+--- a/Decrypt.cpp
++++ b/Decrypt.cpp
+@@ -1365,8 +1365,9 @@
+ 			const uint8_t* pb = reinterpret_cast<const uint8_t*>(&p);
+ 			unsigned long long v64 = 0;
+ 			if (sizeof(p) >= 16) memcpy(&v64, pb + 8, 8);
+-			printf("y52s:   tag=0x%08x val=%llu(0x%llx) raw=",
++			printf("y52s:   tag=0x%08x id=%u val=%llu(0x%llx) raw=",
+ 			       (unsigned)static_cast<uint32_t>(p.tag),
++			       (unsigned)((uint32_t)static_cast<uint32_t>(p.tag) & 0x0FFFFFFFu),
+ 			       v64, v64);
+ 			for (size_t k = 0; k < sizeof(p); ++k)
+ 				printf("%02x", pb[k]);
+@@ -1392,7 +1393,17 @@
+ 				uint64_t v = 0;
+ 				if (sizeof(prm) >= 16)
+ 					memcpy(&v, pb + 8, 8);
+-				const uint32_t tag = (uint32_t)static_cast<uint32_t>(prm.tag);
++				/* Keymaster returns every tag with its kind nibble
++				 * still attached: KM_TAG_USER_SECURE_ID arrives as
++				 * 0xa00001f6 (KM_ULONG_REP), USER_AUTH_TYPE as
++				 * 0x100001f8 (KM_ENUM) and AUTH_TIMEOUT as
++				 * 0x300001f9 (KM_ULONG).  Comparing the raw tag to the
++				 * bare number 502 never matches, which silently looks
++				 * like "this key has no USER_SECURE_ID" and sends the
++				 * unwrap down the no-token path.  Only the low 28 bits
++				 * are the tag id. */
++				const uint32_t tag =
++					(uint32_t)static_cast<uint32_t>(prm.tag) & 0x0FFFFFFFu;
+ 				if (tag == 502)        /* KM_TAG_USER_SECURE_ID */
+ 					want_sid = v;
+ 				else if (tag == 504)   /* KM_TAG_USER_AUTH_TYPE */
+@@ -1403,6 +1414,9 @@
+ 			printf("y52s: tied-profile key requires sid=0x%llx type=%u auth_timeout=%llus\n",
+ 			       (unsigned long long)want_sid, want_type,
+ 			       (unsigned long long)want_timeout);
++			if (want_sid == 0 && want_timeout != 0)
++				printf("y52s: key demands auth but no SID was parsed - "
++				       "tag ids above are 502/504/505, this is a bug\n");
+ 			break;
+ 		}
+ 	}
+@@ -1761,22 +1775,6 @@
+ 				if (user_id == 0)
+ 					return Free_Return(retval, weaver_key, &pwd);
+ 				printf("y52s: profile verify failed, continuing to unwrap\n");
+-			} else {
+-			/* y52s: recover every profile's tied credential now, while this
+-			 * token is seconds old - that key accepts a 30 s window only. */
+-			if (user_id == 0) {
+-				std::vector<userid_t> profiles = Y52s_Profile_Users();
+-				for (size_t i = 0; i < profiles.size(); ++i) {
+-					Y52sTiedEntry* ent = Y52s_Tied_Entry(profiles[i]);
+-					if (ent->attempted)
+-						continue;
+-					ent->attempted = true;
+-					ent->credential =
+-						Get_Tied_Profile_Password(profiles[i], credential);
+-					printf("y52s: profile %d tied credential: %zu bytes\n",
+-					       (int)profiles[i], ent->credential.size());
+-				}
+-			}
+ 			}
+ 		}
+ 	}
+@@ -1817,6 +1815,25 @@
+ 		       (int)user_id, g_y52s_sp_v3 ? 3 : 2);
+ 	}
+ 
++	/* y52s: now that this user's synthetic password is in hand, recover every
++	 * profile's tied credential.  It is done here, not at gatekeeper time,
++	 * because minting the SID token needs the SP: doing it earlier recursed
++	 * into a second unlock of this same user and burned an extra gatekeeper
++	 * verification against a throttle the device cannot afford. */
++	if (user_id == 0) {
++		std::vector<userid_t> profiles = Y52s_Profile_Users();
++		for (size_t i = 0; i < profiles.size(); ++i) {
++			Y52sTiedEntry* ent = Y52s_Tied_Entry(profiles[i]);
++			if (ent->attempted)
++				continue;
++			ent->attempted = true;
++			ent->credential =
++				Get_Tied_Profile_Password(profiles[i], credential);
++			printf("y52s: profile %d tied credential: %zu bytes\n",
++			       (int)profiles[i], ent->credential.size());
++		}
++	}
++
+ 	if (!Decrypt_CE_storage(user_id, token, secret)) {
+ 		return Free_Return(retval, weaver_key, &pwd);
+ 	}

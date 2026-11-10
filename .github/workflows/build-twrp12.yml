@@ -239,8 +239,10 @@ jobs:
               '0012 keystore escrow key lookup by suffix is missing'
           assert b'y52s: reusing owner auth token' in d, \
               'user999 owner-token reuse marker missing from ramdisk'
-          assert b'y52s:   tag=0x%08x val=' in d, \
-              '0010 key authorization value dump missing from ramdisk'
+          assert b'y52s:   tag=0x%08x id=%u val=' in d, \
+              '0014 authorization dump with the masked tag id is missing'
+          assert b'key demands auth but no SID was parsed' in d, \
+              '0014 loud failure for a gated key without a parsed SID is missing'
           assert b'y52s: gatekeeper verify with' in d, \
               '0011 gatekeeper handle probing missing from ramdisk'
           assert b'pwd-embedded handle' in d, \

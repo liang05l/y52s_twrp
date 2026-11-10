@@ -31,6 +31,7 @@ P10="$REPO/patches/system_vold/0010-y52s-key-auth-params-and-runtime-override.pa
 P11="$REPO/patches/system_vold/0011-y52s-plaintext-gatekeeper-handle.patch"
 P12="$REPO/patches/system_vold/0012-y52s-tied-profile-token-from-key-sid.patch"
 P13="$REPO/patches/system_vold/0013-y52s-sid-token-from-synthetic-password.patch"
+P14="$REPO/patches/system_vold/0014-y52s-keymaster-tag-kind-mask.patch"
 MTP="$REPO/patches/bootable_recovery_12.1/0001-y52s-mtp-default-off.patch"
 LINK="$REPO/patches/bootable_recovery_12.1/0002-y52s-keymaster-hidl-link.patch"
 
@@ -207,6 +208,29 @@ if grep -q 'strategy <= 16' Decrypt.cpp; then
   fail "REGRESSION: userId-rewriting strategy table is back"
 fi
 echo "  0013 OK (SP-derived SID token, AOSP uid domains, no hardcoded paths)"
+
+echo "  --- 0014 (mask the Keymaster tag kind before comparing) ---"
+patch -p1 --dry-run -N < "$P14" >/dev/null || fail "0014 does not apply"
+patch -p1 -N -s < "$P14" || fail "0014 apply failed"
+grep -q '& 0xFFFFFFFu' Decrypt.cpp \
+  || fail "0014 missing: tag kind nibble is not masked off"
+grep -q 'tag=0x%08x id=%u val=' Decrypt.cpp \
+  || fail "0014 missing: masked tag id in the authorization dump"
+grep -q 'key demands auth but no SID was parsed' Decrypt.cpp \
+  || fail "0014 missing: loud failure when a gated key yields no SID"
+# The recovery of the profile credential must come after the SP is cached,
+# otherwise minting the SID token unlocks the parent twice.
+python3 - <<'EOF' || fail "0014 REGRESSION: profile recovery still runs before the SP cache"
+import sys
+src = open('Decrypt.cpp').read()
+cached = src.index('synthetic password cached for user')
+recover = src.index('profile %d tied credential')
+sys.exit(0 if recover > cached else 1)
+EOF
+if grep -q 'if (tag == 502)' Decrypt.cpp && ! grep -q '0x0FFFFFFFu' Decrypt.cpp; then
+  fail "REGRESSION: raw tag compared to 502 without masking"
+fi
+echo "  0014 OK (tag ids 502/504/505 read with the kind nibble masked)"
 
 echo "=== bootable/recovery (MTP default off) ==="
 cd "$WORK/bootable/recovery"
