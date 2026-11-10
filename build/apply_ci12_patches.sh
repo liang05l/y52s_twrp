@@ -30,6 +30,7 @@ P9="$REPO/patches/system_vold/0009-y52s-u999-credential-and-auth-dump.patch"
 P10="$REPO/patches/system_vold/0010-y52s-key-auth-params-and-runtime-override.patch"
 P11="$REPO/patches/system_vold/0011-y52s-plaintext-gatekeeper-handle.patch"
 P12="$REPO/patches/system_vold/0012-y52s-tied-profile-token-from-key-sid.patch"
+P13="$REPO/patches/system_vold/0013-y52s-sid-token-from-synthetic-password.patch"
 MTP="$REPO/patches/bootable_recovery_12.1/0001-y52s-mtp-default-off.patch"
 LINK="$REPO/patches/bootable_recovery_12.1/0002-y52s-keymaster-hidl-link.patch"
 
@@ -183,6 +184,29 @@ fi
 grep -q 'memcpy(&authToken.userId, p, 8); p += 8;' Decrypt.cpp \
   || fail "REGRESSION: upstream auth token parser was modified"
 echo "  0012 OK (SID-driven token, no userId rewriting, no hardcoded ids)"
+
+echo "  --- 0013 (SID enrolment opened by the synthetic password) ---"
+patch -p1 --dry-run -N < "$P13" >/dev/null || fail "0013 does not apply"
+patch -p1 -N -s < "$P13" || fail "0013 apply failed"
+grep -q 'Y52s_Mint_Sid_Token' Decrypt.cpp \
+  || fail "0013 missing: SID token minted from the synthetic password"
+grep -q 'sp-gk-authentication' Decrypt.cpp \
+  || fail "0013 missing: AOSP sp-gk-authentication label"
+grep -q 'real_uid' Decrypt.cpp \
+  || fail "0013 missing: enrolment uid domain"
+grep -q 'g_y52s_sp = secret' Decrypt.cpp \
+  || fail "0013 missing: synthetic password cache"
+# The PIN cannot open the SID enrolment: attempting it only burns throttle.
+if grep -q 'plain_path' Decrypt.cpp; then
+  fail "REGRESSION: the PIN is still tried against the SID handle"
+fi
+if grep -q 'keystore/user_0/1000_USRPKEY' Decrypt.cpp; then
+  fail "REGRESSION: hardcoded keystore user_0/1000 path is back"
+fi
+if grep -q 'strategy <= 16' Decrypt.cpp; then
+  fail "REGRESSION: userId-rewriting strategy table is back"
+fi
+echo "  0013 OK (SP-derived SID token, AOSP uid domains, no hardcoded paths)"
 
 echo "=== bootable/recovery (MTP default off) ==="
 cd "$WORK/bootable/recovery"
