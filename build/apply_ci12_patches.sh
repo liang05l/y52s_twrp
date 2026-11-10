@@ -60,6 +60,14 @@ grep -q 'y52s: scrypt password token' Decrypt.cpp \
   || fail "0007 missing: AOSP default-password scrypt derivation"
 grep -q 'Password != "!" || user_id != 0' Decrypt.cpp \
   || fail "0007 missing: gatekeeper verify enabled for password-less profiles"
+grep -q 'Get_Tied_Profile_Password' Decrypt.cpp \
+  || fail "0007 missing: AOSP unified-challenge tied-profile credential"
+grep -q 'gatekeeper.profile.key' Decrypt.cpp \
+  || fail "0007 missing: tied-profile lock file path"
+grep -q 'profile_key_name_decrypt_' Decrypt.cpp \
+  || fail "0007 missing: tied-profile keystore key alias"
+grep -q 'Decrypt_User_Synth_Pass(user_id, tied)' Decrypt.cpp \
+  || fail "0007 missing: tied-profile credential wired into Decrypt_User"
 grep -q 'y52s: reusing owner auth token' Decrypt.cpp \
   || fail "0007 marker missing (owner token reuse before unwrap)"
 grep -q 'if (user_id != 0 \&\& auth_token_len == 0)' Decrypt.cpp \

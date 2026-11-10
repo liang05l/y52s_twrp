@@ -1,6 +1,149 @@
 --- a/Decrypt.cpp
 +++ b/Decrypt.cpp
-@@ -970,20 +970,30 @@
+@@ -906,6 +906,142 @@
+     return 100000 + uid;
+ }
+ 
++/* ===========================================================================
++ * y52s / PD2057 -- AOSP "tied profile" (unified challenge) credential.
++ *
++ * LockSettingsService.tieManagedProfileLockIfNecessary() (Android 10):
++ *   randomLockSeed = SecureRandom("SHA1PRNG").generateSeed(40)
++ *   newPassword    = HexEncoding.encode(randomLockSeed)   -> 80 ASCII chars
++ *   setLockCredentialInternal(newPassword, PASSWORD, ..., profileId)
++ *   tieProfileLockToParent(profileId, newPassword)
++ * The profile's SP is therefore bound to a RANDOM 80-char password the user
++ * never sees. It is AES-256-GCM encrypted under an auth-bound AndroidKeystore
++ * key aliased "profile_key_name_decrypt_<userId>" and stored as
++ *   /data/system/users/<userId>/gatekeeper.profile.key = IV(12) || ct || tag
++ * getDecryptedPasswordForTiedProfile() decrypts it with the OWNER's auth
++ * token -- exactly the 69-byte HW_AUTH_TOKEN TWRP writes to /auth_token when
++ * user 0 is decrypted.
++ *
++ * TWRP never implemented this path: it only tries the owner PIN and "!", both
++ * of which fail gatekeeper verify against the profile's own .pwd.
++ * =========================================================================== */
++static std::string Get_Tied_Profile_Password(const userid_t user_id) {
++	using android::vold::km::AuthorizationSetBuilder;
++	using android::vold::km::TAG_PURPOSE;
++	using android::vold::km::TAG_ALGORITHM;
++	using android::vold::km::TAG_BLOCK_MODE;
++	using android::vold::km::TAG_PADDING;
++	using android::vold::km::TAG_NONCE;
++	using android::vold::km::TAG_MAC_LENGTH;
++	using android::vold::km::KeyPurpose;
++	using android::vold::km::Algorithm;
++	using android::vold::km::BlockMode;
++	using android::vold::km::PaddingMode;
++	using android::vold::Keymaster;
++	using android::vold::KeymasterOperation;
++
++	char lock_path[PATH_MAX];
++	snprintf(lock_path, sizeof(lock_path),
++		"/data/system/users/%d/gatekeeper.profile.key", (int)user_id);
++	std::string stored;
++	if (!android::base::ReadFileToString(lock_path, &stored) || stored.size() < 29) {
++		printf("y52s: no tied-profile lock file %s\\n", lock_path);
++		return "";
++	}
++	const std::string nonce = stored.substr(0, 12);
++	const std::string ciphertext = stored.substr(12);
++
++	char key_path[PATH_MAX];
++	snprintf(key_path, sizeof(key_path),
++		"/data/misc/keystore/user_0/1000_USRPKEY_profile_key_name_decrypt_%d", (int)user_id);
++	std::string key_blob;
++	if (!android::base::ReadFileToString(key_path, &key_blob) || key_blob.empty()) {
++		printf("y52s: no tied-profile keystore key %s\\n", key_path);
++		return "";
++	}
++
++	Keymaster keymaster;
++	if (!keymaster) {
++		printf("y52s: keymaster device unavailable for tied profile\\n");
++		return "";
++	}
++	// Android 10 keystore blob: 40-byte header followed by the raw
++	// keymaster blob (same layout as the synthetic_password_* blobs).
++	std::string km_blob;
++	const size_t offsets[] = {40, 0, 4, 44};
++	for (size_t off : offsets) {
++		if (key_blob.size() <= off + 16) continue;
++		std::string cand = key_blob.substr(off);
++		android::vold::km::AuthorizationSet hw, sw;
++		if (keymaster.getKeyCharacteristics(cand, &hw, &sw)) {
++			km_blob = cand;
++			printf("y52s: tied-profile key blob at offset %zu (%zu bytes)\\n", off, km_blob.size());
++			break;
++		}
++	}
++	if (km_blob.empty()) {
++		printf("y52s: tied-profile key blob not usable\\n");
++		return "";
++	}
++
++	android::hardware::keymaster::V4_0::HardwareAuthToken authToken;
++	std::string tok;
++	if (!android::base::ReadFileToString("/auth_token", &tok) || tok.size() < 69) {
++		printf("y52s: no owner auth token for tied-profile key\\n");
++		return "";
++	}
++	{
++		const uint8_t* p = (const uint8_t*)tok.data();
++		p += 1;                                   // version
++		memcpy(&authToken.challenge, p, 8); p += 8;
++		memcpy(&authToken.userId, p, 8); p += 8;
++		memcpy(&authToken.authenticatorId, p, 8); p += 8;
++		uint32_t authType; memcpy(&authType, p, 4); p += 4; authType = ntohl(authType);
++		authToken.authenticatorType = static_cast<
++			android::hardware::keymaster::V4_0::HardwareAuthenticatorType>(authType);
++		uint64_t timestamp; memcpy(&timestamp, p, 8); p += 8;
++		timestamp = ((timestamp & 0x00000000000000FFULL) << 56) |
++			((timestamp & 0x000000000000FF00ULL) << 40) |
++			((timestamp & 0x0000000000FF0000ULL) << 24) |
++			((timestamp & 0x000000FF00000000ULL) << 8) |
++			((timestamp & 0x0000FF0000000000ULL) >> 8) |
++			((timestamp & 0x00FF000000000000ULL) >> 24) |
++			((timestamp & 0xFF00000000000000ULL) >> 56);
++		authToken.timestamp = timestamp;
++		authToken.mac.resize(32);
++		memcpy(authToken.mac.data(), p, 32);
++	}
++
++	std::vector<uint8_t> nonce_vec(nonce.begin(), nonce.end());
++	auto params = AuthorizationSetBuilder()
++		.Authorization(TAG_PURPOSE, KeyPurpose::DECRYPT)
++		.Authorization(TAG_ALGORITHM, Algorithm::AES)
++		.Authorization(TAG_BLOCK_MODE, BlockMode::GCM)
++		.Authorization(TAG_PADDING, PaddingMode::NONE)
++		.Authorization(TAG_NONCE, nonce_vec)
++		.Authorization(TAG_MAC_LENGTH, 128);
++	android::vold::km::AuthorizationSet outParams;
++	KeymasterOperation op;
++	op = keymaster.begin(km_blob, params, &outParams, authToken);
++	if (!op) {
++		printf("y52s: tied-profile keymaster begin failed: %d\\n", (int)op.getErrorCode());
++		return "";
++	}
++	std::string plain, tail;
++	if (!op.updateCompletely(ciphertext, &plain)) {
++		printf("y52s: tied-profile keymaster update failed\\n");
++		return "";
++	}
++	if (!op.finish(&tail)) {
++		printf("y52s: tied-profile keymaster finish failed\\n");
++		return "";
++	}
++	plain += tail;
++	printf("y52s: tied-profile credential recovered (%zu bytes)\\n", plain.size());
++	return plain;
++}
++
++
+ bool Is_Weaver(const std::string& spblob_path, const std::string& handle_str) {
+ 	printf("Is_Weaver\n");
+ 	std::string weaver_file = spblob_path + handle_str + ".weaver";
+@@ -970,20 +1106,23 @@
  	// printf("Password: '%s'\n", Password.c_str());
  	// The password token is the password scrypted with the parameters from the password data file
  	unsigned char password_token[PASSWORD_TOKEN_SIZE];
@@ -15,23 +158,17 @@
 -			return Free_Return(retval, weaver_key, &pwd);
 -		}
 -	} else {
+-		android::keystore::copySqliteDb(); // early copy db for keystore
+-		std::string defpassword = "default-password";
+-		memcpy(password_token, defpassword.data(), defpassword.length());
 +	memset(password_token, 0, PASSWORD_TOKEN_SIZE);
-+	/* y52s -- AOSP10 SyntheticPasswordManager.java (android-10.0.0_r1):
-+	 *   DEFAULT_PASSWORD = "default-password"                     (16 bytes)
-+	 *   computePasswordToken(credential, pwd) = scrypt(credential,
-+	 *       pwd.salt, 1<<scryptN, 1<<scryptR, 1<<scryptP, 32)
-+	 * TWRP's "!" branch used to memcpy those 16 bytes verbatim into a
-+	 * 32-byte password_token (leaving 16 bytes of uninitialised stack) and
-+	 * skipped Get_Password_Data() entirely. For a password-less profile such
-+	 * as vivo DOUBLE_APP user 999 that yields a WRONG application_id and NO
-+	 * gatekeeper handle. Always derive through scrypt with THIS user's
-+	 * PasswordData, using the AOSP default credential for "!". */
++	/* AOSP DEFAULT_PASSWORD="default-password" must still go through scrypt
++	 * with this user's PasswordData; TWRP used to memcpy 16 bytes into a
++	 * 32-byte token. */
 +	const std::string credential =
 +		(Password == "!") ? std::string("default-password") : Password;
 +	if (Password == "!") {
- 		android::keystore::copySqliteDb(); // early copy db for keystore
--		std::string defpassword = "default-password";
--		memcpy(password_token, defpassword.data(), defpassword.length());
++		android::keystore::copySqliteDb();
 +	}
 +	if (!Get_Password_Data(spblob_path, handle_str, &pwd)) {
 +		printf("Failed to Get_Password_Data\n");
@@ -44,28 +181,21 @@
  	}
  	// output_hex(&password_token[0], PASSWORD_TOKEN_SIZE);printf("\n");
  	if (Is_Weaver(spblob_path, handle_str)) {
-@@ -1053,7 +1063,13 @@
+@@ -1053,7 +1192,8 @@
  		}
  		memcpy((void*)&application_id[0], (void*)&password_token[0], PASSWORD_TOKEN_SIZE);
  		memcpy((void*)&application_id[PASSWORD_TOKEN_SIZE], secdiscardable, SHA512_DIGEST_LENGTH);
 -		if (Password != "!") {
-+		/* y52s -- AOSP unwrapPasswordBasedSyntheticPassword() calls
-+		 * gatekeeper.verifyChallenge(fakeUid(userId), 0, pwd.passwordHandle,
-+		 * passwordTokenToGkInput(pwdToken)) UNCONDITIONALLY, even for
-+		 * DEFAULT_PASSWORD users. TWRP skipped it for "!", so a password-less
-+		 * profile never got its OWN auth token: its SP key is bound to the
-+		 * profile SID and keymaster answered -26. Run it for all users. */
++		/* AOSP runs verifyChallenge even for DEFAULT_PASSWORD users. */
 +		if (Password != "!" || user_id != 0) {
  			int ret = -1;
  			bool request_reenroll = false;
  			android::sp<android::hardware::gatekeeper::V1_0::IGatekeeper> gk_device;
-@@ -1109,14 +1125,33 @@
+@@ -1109,14 +1249,27 @@
  			free(gk_pwd_token);
  			if (!hwRet.isOk() || ret != 0) {
  				printf("gatekeeper verification failed (ret=%d)\n", ret);
 -				return Free_Return(retval, weaver_key, &pwd);
-+				/* y52s: for a secondary user keep going so unwrap still runs
-+				 * with the owner-token fallback and leaves a complete log. */
 +				if (user_id == 0)
 +					return Free_Return(retval, weaver_key, &pwd);
 +				printf("y52s: profile verify failed, continuing to unwrap\n");
@@ -78,10 +208,6 @@
  	// Now we will handle https://android.googlesource.com/platform/frameworks/base/+/android-8.0.0_r23/services/core/java/com/android/server/locksettings/SyntheticPasswordManager.java#816
  	// Plus we will include the last bit that computes the disk decrypt key found in:
  	// https://android.googlesource.com/platform/frameworks/base/+/android-8.0.0_r23/services/core/java/com/android/server/locksettings/SyntheticPasswordManager.java#153
-+	/* y52s: if the profile gatekeeper verify still failed, fall back to the
-+	 * owner's 69-byte HW_AUTH_TOKEN that user 0 wrote to /auth_token.
-+	 * (18.14 proved the owner token alone is NOT sufficient, so this is only
-+	 * a last-resort diagnostic path; the real fix is scrypt + verify above.) */
 +	if (user_id != 0 && auth_token_len == 0) {
 +		struct stat st;
 +		if (stat("/auth_token", &st) == 0 && st.st_size >= 69) {
@@ -95,3 +221,21 @@
  	secret = android::keystore::unwrapSyntheticPasswordBlob(spblob_path, handle_str, user_id, (const void*)&application_id[0], 
  		PASSWORD_TOKEN_SIZE + SHA512_DIGEST_LENGTH, auth_token_len);
  	if (!secret.size()) {
+@@ -1189,6 +1342,17 @@
+ extern "C" bool Decrypt_User(const userid_t user_id, const std::string& Password) {
+ 	printf("[DEBUG] Decrypt_User: ENTER user_id=%d\n", user_id);
+ 	printf("Attempting to decrypt user\n");
++	/* y52s: a managed profile with a unified challenge does not use the
++	 * owner's PIN. Recover its AOSP tied-profile random credential and use
++	 * that instead; fall back to the supplied password if unavailable. */
++	if (user_id != 0) {
++		std::string tied = Get_Tied_Profile_Password(user_id);
++		if (!tied.empty()) {
++			if (Decrypt_User_Synth_Pass(user_id, tied))
++				return true;
++			printf("y52s: tied-profile decrypt failed, trying supplied password\n");
++		}
++	}
+     uint8_t *auth_token;
+     uint32_t auth_token_len;
+     int ret;

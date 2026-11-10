@@ -88,3 +88,7 @@ build/ci12v4/*.img
 !build/ci12v4/recovery.img.sha256
 !flash/probe_keymaster_lifecycle.sh
 !reference/aosp10/LockSettingsService.java
+!flash/probe_tied_profile.sh
+!reference/aosp10/LockSettingsStorage.java
+!reference/aosp10/LockPatternUtils.java
+!reference/aosp10/SyntheticPasswordCrypto.java
