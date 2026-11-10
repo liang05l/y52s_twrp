@@ -225,6 +225,12 @@ jobs:
               '0008 Decrypt_User cache fallback missing from ramdisk'
           assert b'AUTH_TIMEOUT=30000' in d, \
               '0008 monotonic-clock diagnostic missing from ramdisk'
+          assert b'y52s: using supplied user-999 credential' in d, \
+              '0009 credential-file fast path missing from ramdisk'
+          assert b'/cache/recovery/u999_cred' in d, \
+              '0009 persistent credential path missing from ramdisk'
+          assert b'y52s:   tag=0x' in d, \
+              '0009 auth-set dump missing from ramdisk'
           assert b'y52s_km_only' in d, \
               'runtime strategy override marker missing from ramdisk'
           assert b'__builtin_bswap64' not in d, \

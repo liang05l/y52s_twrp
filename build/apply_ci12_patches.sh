@@ -26,6 +26,7 @@ WORK="${TWRP_WORK:?TWRP_WORK required}"
 VD="$REPO/reference/y73s/patches/system_vold"
 P7="$REPO/patches/system_vold/0007-y52s-owner-auth-token-for-secondary-users.patch"
 P8="$REPO/patches/system_vold/0008-y52s-fresh-owner-auth-token.patch"
+P9="$REPO/patches/system_vold/0009-y52s-u999-credential-and-auth-dump.patch"
 MTP="$REPO/patches/bootable_recovery_12.1/0001-y52s-mtp-default-off.patch"
 LINK="$REPO/patches/bootable_recovery_12.1/0002-y52s-keymaster-hidl-link.patch"
 
@@ -107,6 +108,23 @@ grep -q 'no fresh cached credential' Decrypt.cpp \
 grep -q 'memcpy(&authToken.userId, p, 8); p += 8;' Decrypt.cpp \
   || fail "REGRESSION: upstream auth token parser was modified by 0008"
 echo "  0008 fresh-token patch OK"
+
+echo "  --- 0009 (definitive u999 credential + auth-set dump) ---"
+git apply --check "$P9" || fail "0009 does not apply"
+git apply "$P9" || fail "0009 apply failed"
+grep -q 'y52s: using supplied user-999 credential' Decrypt.cpp \
+  || fail "0009 missing: user-999 credential file fast path"
+grep -q '/cache/recovery/u999_cred' Decrypt.cpp \
+  || fail "0009 missing: persistent credential path"
+grep -q 'dump_auth_set' Decrypt.cpp \
+  || fail "0009 missing: full KeyParameter dump for SID decoding"
+# Regression guards: upstream parser and no-bswap64 rule must still hold.
+grep -q 'memcpy(&authToken.userId, p, 8); p += 8;' Decrypt.cpp \
+  || fail "REGRESSION: upstream auth token parser was modified"
+if grep -q '__builtin_bswap64' Decrypt.cpp; then
+  fail "REGRESSION: __builtin_bswap64 breaks user 0 decryption"
+fi
+echo "  0009 OK (credential fast path + auth-set dump; regression guards pass)"
 
 echo "=== bootable/recovery (MTP default off) ==="
 cd "$WORK/bootable/recovery"
