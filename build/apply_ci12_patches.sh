@@ -28,6 +28,7 @@ P7="$REPO/patches/system_vold/0007-y52s-owner-auth-token-for-secondary-users.pat
 P8="$REPO/patches/system_vold/0008-y52s-fresh-owner-auth-token.patch"
 P9="$REPO/patches/system_vold/0009-y52s-u999-credential-and-auth-dump.patch"
 P10="$REPO/patches/system_vold/0010-y52s-key-auth-params-and-runtime-override.patch"
+P11="$REPO/patches/system_vold/0011-y52s-plaintext-gatekeeper-handle.patch"
 MTP="$REPO/patches/bootable_recovery_12.1/0001-y52s-mtp-default-off.patch"
 LINK="$REPO/patches/bootable_recovery_12.1/0002-y52s-keymaster-hidl-link.patch"
 
@@ -143,6 +144,17 @@ if grep -q '__builtin_bswap64' Decrypt.cpp; then
   fail "REGRESSION: __builtin_bswap64 breaks user 0 decryption"
 fi
 echo "  0010 OK (TWRP-only; no system-state tool/dex/credential hand-off)"
+
+echo "  --- 0011 (plaintext gatekeeper handle for the tied-profile escrow) ---"
+git apply --check "$P11" || fail "0011 does not apply"
+git apply "$P11" || fail "0011 apply failed"
+grep -q 'y52s: gatekeeper verify with' Decrypt.cpp \
+  || fail "0011 missing: per-handle gatekeeper verify logging"
+grep -q '0000000000000000.handle' Decrypt.cpp \
+  || fail "0011 missing: plaintext spblob handle fallback"
+grep -q 'pwd-embedded handle' Decrypt.cpp \
+  || fail "0011 missing: .pwd handle fallback (single-enrolment devices)"
+echo "  0011 OK (multi-enrolment gatekeeper handle, with fallback)"
 
 echo "=== bootable/recovery (MTP default off) ==="
 cd "$WORK/bootable/recovery"

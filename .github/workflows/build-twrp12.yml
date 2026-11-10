@@ -233,6 +233,16 @@ jobs:
               '0010 runtime USER_AUTH_TYPE override missing from ramdisk'
           assert b'y52s: OVERRIDE userId' in d, \
               '0010 override logging missing from ramdisk'
+          assert b'y52s: gatekeeper verify with' in d, \
+              '0011 multi-enrolment gatekeeper handle missing from ramdisk'
+          assert b'0000000000000000.handle' in d, \
+              '0011 plaintext spblob handle fallback missing from ramdisk'
+          assert b'pwd-embedded handle' in d, \
+              '0011 .pwd handle fallback missing from ramdisk'
+          assert b'y52s_ks_prep: src=' in d, \
+              'keystore tmpfs prep script missing from ramdisk'
+          assert b'/system/kslib' in d, \
+              'keystore private library path missing from ramdisk'
           assert b'addAuthToken(' not in d, \
               'REGRESSION: addAuthToken does not exist on Keymaster 3.0/4.0'
           assert b'y52s: using supplied user-999 credential' not in d, \
