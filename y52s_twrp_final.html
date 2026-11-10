@@ -1459,6 +1459,22 @@ U0=1  U999=0  /data/user/999 = 7 个乱码目录名</pre>
   <li>这意味着纯 TWRP 内修复还差一步：<strong>让原厂 keystore 在 recovery 里成功注册 binder 服务</strong>（rc 服务声明 / SELinux / binder 域），之后再由 TWRP 自己的 <code>Decrypt.cpp</code> 触发 <code>ctl.start keystore_auth</code>、把 <code>/auth_token</code> 注册进认证表，最后仍由 TWRP 自己完成 <code>begin()</code> 与后续 CE key 安装。这一步尚未打通，<strong>不宣称已修好</strong>。</li>
 </ul>
 
+<h4>18.28.2b TWRP 11 源码确认（本轮新取回，纯 TWRP 依据）</h4>
+<p>从 <code>TeamWin/android_bootable_recovery@android-11</code> 拉回 <code>crypto/fscrypt/keystore_auth.cpp</code>(108 行) 与 <code>Decrypt.cpp</code>，确认了被 0006 删掉的那条链的确切形态：</p>
+<pre>// keystore_auth.cpp（运行在 user system，不是 root）
+binder = defaultServiceManager()-&gt;getService(String16("android.security.keystore"));
+service = interface_cast&lt;IKeystoreService&gt;(binder);
+service-&gt;addAuthToken(auth_token, size);   // 原始 69 字节
+unlink("/auth_token");
+
+// Decrypt.cpp:622（TWRP 11 unwrapSyntheticPasswordBlob 内）
+if (auth_token_len &gt; 0) {
+    printf("Starting keystore_auth service...\n");
+    property_set("ctl.start", "keystore_auth");
+}</pre>
+<p>即：<strong>TWRP 11 是自己把 Gatekeeper 签发的原始 token 交给 keystore 服务注册进认证表，再由 keystore 代客执行 auth-bound key 操作</strong>；整个流程只在 recovery 内，用 TWRP 自带的二进制和服务，不需要系统态、不需要 dex。Y73s 0006 改成直连 Keymaster 4.0 HIDL <code>begin()</code> 后，这一步消失了，而 Keymaster 4.0 HAL 全文没有 <code>addAuthToken</code>（3.0 才有），设备 VINTF 也只声明 4.0 → 直连路径无法把 token 灌进 TEE 认证表，这就是 <code>-26</code> 的结构性根因。</p>
+<p>设备侧另确认：<code>/data/misc/keystore/user_0/</code> 里只有 <code>1000_USRPKEY_profile_key_name_decrypt_999</code>(248 B) 及 <code>_bak1/_bak2</code>，<strong>没有</strong> <code>profile_key_name_encrypt_999</code> 别名（vivo 只保留了 DECRYPT 用途），因此不存在「换一个不要求认证的别名绕过去」的捷径；999 的 <code>spblob</code> 目录里 <code>.e0</code>(60 B) / <code>.p1</code>(32 B) escrow 文件仍在，但 AOSP 的 token-based 解包需要外部 token，TWRP 未实现。</p>
+
 <h4>18.28.3 当前状态（所有运行时改动已还原）</h4>
 <p>本轮所有推库 / 换二进制 / 挂载都只发生在 tmpfs ramdisk，结束后已用 <code>build/repack_ramdisk.py</code> 的 cpio 解析器从 <code>ad1b22b0…</code> 镜像把 <code>system/bin/keystore</code>、<code>keystore_auth</code>、<code>keystore_cli_v2</code>、<code>libprotobuf-cpp-lite.so</code>、<code>android.system.wifi.keystore@1.0.so</code> 逐一还原为原始字节；额外推入的 7 个库、<code>/system/lib64/twrp11/</code>、<code>/auth_token</code>、<code>/auth_error</code>、临时挂载点全部删除；<code>ctl.stop keystore_auth</code> 已下发。<strong>分区与 BCB 从未改动</strong>。</p>
 <p>设备当前：U0=1（<code>/data/media/0</code> 96 个正常目录）、U999=0（7 个密文目录名）、<code>sys.usb.config=adb</code>、BCB 全 0、分区哈希 <code>ad1b22b0…</code>。回退 <code>build/recovery.img</code> = <code>a3855ed4…</code> 保留，全程未 format/wipe。</p>
