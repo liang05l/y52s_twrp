@@ -95,3 +95,5 @@ build/ci12v4/*.img
 !build/ci12v5/
 build/ci12v5/*.img
 !build/ci12v5/recovery.img.sha256
+!flash/probe_tied_result.sh
+!flash/probe_authtoken_bytes.sh

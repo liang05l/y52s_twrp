@@ -1,9 +1,26 @@
 --- a/Decrypt.cpp
 +++ b/Decrypt.cpp
-@@ -906,6 +906,142 @@
+@@ -749,6 +749,15 @@
+ 					            ((timestamp & 0x00FF000000000000ULL) >> 40) |
+ 					            ((timestamp & 0xFF00000000000000ULL) >> 56);
+ 					authToken.timestamp = timestamp;
++					/* y52s: hw_auth_token_t multi-byte fields are BIG-ENDIAN. The upstream
++					 * parser above memcpy()s challenge/userId/authenticatorId verbatim, so
++					 * an auth-bound key compares a byte-swapped SID and returns -26.
++					 * authType/timestamp were already converted correctly. */
++#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
++					authToken.challenge       = __builtin_bswap64(authToken.challenge);
++					authToken.userId          = __builtin_bswap64(authToken.userId);
++					authToken.authenticatorId = __builtin_bswap64(authToken.authenticatorId);
++#endif
+ 					authToken.mac.resize(32);
+ 					memcpy(authToken.mac.data(), p, 32);
+ 					hasAuthToken = true;
+@@ -905,6 +914,148 @@
+ userid_t fakeUid(const userid_t uid) {
      return 100000 + uid;
  }
- 
++
 +/* ===========================================================================
 + * y52s / PD2057 -- AOSP "tied profile" (unified challenge) credential.
 + *
@@ -43,7 +60,7 @@
 +		"/data/system/users/%d/gatekeeper.profile.key", (int)user_id);
 +	std::string stored;
 +	if (!android::base::ReadFileToString(lock_path, &stored) || stored.size() < 29) {
-+		printf("y52s: no tied-profile lock file %s\\n", lock_path);
++		printf("y52s: no tied-profile lock file %s\n", lock_path);
 +		return "";
 +	}
 +	const std::string nonce = stored.substr(0, 12);
@@ -54,13 +71,13 @@
 +		"/data/misc/keystore/user_0/1000_USRPKEY_profile_key_name_decrypt_%d", (int)user_id);
 +	std::string key_blob;
 +	if (!android::base::ReadFileToString(key_path, &key_blob) || key_blob.empty()) {
-+		printf("y52s: no tied-profile keystore key %s\\n", key_path);
++		printf("y52s: no tied-profile keystore key %s\n", key_path);
 +		return "";
 +	}
 +
 +	Keymaster keymaster;
 +	if (!keymaster) {
-+		printf("y52s: keymaster device unavailable for tied profile\\n");
++		printf("y52s: keymaster device unavailable for tied profile\n");
 +		return "";
 +	}
 +	// Android 10 keystore blob: 40-byte header followed by the raw
@@ -73,41 +90,47 @@
 +		android::vold::km::AuthorizationSet hw, sw;
 +		if (keymaster.getKeyCharacteristics(cand, &hw, &sw)) {
 +			km_blob = cand;
-+			printf("y52s: tied-profile key blob at offset %zu (%zu bytes)\\n", off, km_blob.size());
++			printf("y52s: tied-profile key blob at offset %zu (%zu bytes)\n", off, km_blob.size());
 +			break;
 +		}
 +	}
 +	if (km_blob.empty()) {
-+		printf("y52s: tied-profile key blob not usable\\n");
++		printf("y52s: tied-profile key blob not usable\n");
 +		return "";
 +	}
 +
 +	android::hardware::keymaster::V4_0::HardwareAuthToken authToken;
 +	std::string tok;
 +	if (!android::base::ReadFileToString("/auth_token", &tok) || tok.size() < 69) {
-+		printf("y52s: no owner auth token for tied-profile key\\n");
++		printf("y52s: no owner auth token for tied-profile key\n");
 +		return "";
 +	}
 +	{
++		/* y52s: hw_auth_token_t (gatekeeper HAL) is BIG-ENDIAN for every
++		 * multi-byte field: challenge, user_id(SID), authenticator_id,
++		 * authenticator_type, timestamp. Android targets are little-endian.
++		 * Measured raw /auth_token on this device (first 37 bytes):
++		 *   00 | 00*8 | c8 db e6 49 8e 82 c2 bb | 00*8 | 00 00 00 01 | ...
++		 * user_id big-endian = 0xc8dbe6498e82c2bb. The previous memcpy produced
++		 * 0xbbc2828e49e6dbc8, and keymaster rejected the auth-bound
++		 * profile_key_name_decrypt_999 key with -26. */
 +		const uint8_t* p = (const uint8_t*)tok.data();
 +		p += 1;                                   // version
-+		memcpy(&authToken.challenge, p, 8); p += 8;
-+		memcpy(&authToken.userId, p, 8); p += 8;
-+		memcpy(&authToken.authenticatorId, p, 8); p += 8;
-+		uint32_t authType; memcpy(&authType, p, 4); p += 4; authType = ntohl(authType);
++		uint64_t v;
++		memcpy(&v, p, 8); p += 8; authToken.challenge       = __builtin_bswap64(v);
++		memcpy(&v, p, 8); p += 8; authToken.userId          = __builtin_bswap64(v);
++		memcpy(&v, p, 8); p += 8; authToken.authenticatorId = __builtin_bswap64(v);
++		uint32_t t; memcpy(&t, p, 4); p += 4;
 +		authToken.authenticatorType = static_cast<
-+			android::hardware::keymaster::V4_0::HardwareAuthenticatorType>(authType);
-+		uint64_t timestamp; memcpy(&timestamp, p, 8); p += 8;
-+		timestamp = ((timestamp & 0x00000000000000FFULL) << 56) |
-+			((timestamp & 0x000000000000FF00ULL) << 40) |
-+			((timestamp & 0x0000000000FF0000ULL) << 24) |
-+			((timestamp & 0x000000FF00000000ULL) << 8) |
-+			((timestamp & 0x0000FF0000000000ULL) >> 8) |
-+			((timestamp & 0x00FF000000000000ULL) >> 24) |
-+			((timestamp & 0xFF00000000000000ULL) >> 56);
-+		authToken.timestamp = timestamp;
++			android::hardware::keymaster::V4_0::HardwareAuthenticatorType>(__builtin_bswap32(t));
++		memcpy(&v, p, 8); p += 8; authToken.timestamp = __builtin_bswap64(v);
 +		authToken.mac.resize(32);
 +		memcpy(authToken.mac.data(), p, 32);
++		printf("y52s: corrected hw_auth_token byte order: userId=0x%llx authId=0x%llx type=%u ts=%llu\n",
++			(unsigned long long)authToken.userId,
++			(unsigned long long)authToken.authenticatorId,
++			(unsigned int)authToken.authenticatorType,
++			(unsigned long long)authToken.timestamp);
 +	}
 +
 +	std::vector<uint8_t> nonce_vec(nonce.begin(), nonce.end());
@@ -122,28 +145,27 @@
 +	KeymasterOperation op;
 +	op = keymaster.begin(km_blob, params, &outParams, authToken);
 +	if (!op) {
-+		printf("y52s: tied-profile keymaster begin failed: %d\\n", (int)op.getErrorCode());
++		printf("y52s: tied-profile keymaster begin failed: %d\n", (int)op.getErrorCode());
 +		return "";
 +	}
 +	std::string plain, tail;
 +	if (!op.updateCompletely(ciphertext, &plain)) {
-+		printf("y52s: tied-profile keymaster update failed\\n");
++		printf("y52s: tied-profile keymaster update failed\n");
 +		return "";
 +	}
 +	if (!op.finish(&tail)) {
-+		printf("y52s: tied-profile keymaster finish failed\\n");
++		printf("y52s: tied-profile keymaster finish failed\n");
 +		return "";
 +	}
 +	plain += tail;
-+	printf("y52s: tied-profile credential recovered (%zu bytes)\\n", plain.size());
++	printf("y52s: tied-profile credential recovered (%zu bytes)\n", plain.size());
 +	return plain;
 +}
 +
-+
+ 
  bool Is_Weaver(const std::string& spblob_path, const std::string& handle_str) {
  	printf("Is_Weaver\n");
- 	std::string weaver_file = spblob_path + handle_str + ".weaver";
-@@ -970,20 +1106,23 @@
+@@ -970,20 +1121,23 @@
  	// printf("Password: '%s'\n", Password.c_str());
  	// The password token is the password scrypted with the parameters from the password data file
  	unsigned char password_token[PASSWORD_TOKEN_SIZE];
@@ -181,7 +203,7 @@
  	}
  	// output_hex(&password_token[0], PASSWORD_TOKEN_SIZE);printf("\n");
  	if (Is_Weaver(spblob_path, handle_str)) {
-@@ -1053,7 +1192,8 @@
+@@ -1053,7 +1207,8 @@
  		}
  		memcpy((void*)&application_id[0], (void*)&password_token[0], PASSWORD_TOKEN_SIZE);
  		memcpy((void*)&application_id[PASSWORD_TOKEN_SIZE], secdiscardable, SHA512_DIGEST_LENGTH);
@@ -191,7 +213,7 @@
  			int ret = -1;
  			bool request_reenroll = false;
  			android::sp<android::hardware::gatekeeper::V1_0::IGatekeeper> gk_device;
-@@ -1109,14 +1249,27 @@
+@@ -1109,14 +1264,27 @@
  			free(gk_pwd_token);
  			if (!hwRet.isOk() || ret != 0) {
  				printf("gatekeeper verification failed (ret=%d)\n", ret);
@@ -221,7 +243,7 @@
  	secret = android::keystore::unwrapSyntheticPasswordBlob(spblob_path, handle_str, user_id, (const void*)&application_id[0], 
  		PASSWORD_TOKEN_SIZE + SHA512_DIGEST_LENGTH, auth_token_len);
  	if (!secret.size()) {
-@@ -1189,6 +1342,17 @@
+@@ -1189,6 +1357,17 @@
  extern "C" bool Decrypt_User(const userid_t user_id, const std::string& Password) {
  	printf("[DEBUG] Decrypt_User: ENTER user_id=%d\n", user_id);
  	printf("Attempting to decrypt user\n");

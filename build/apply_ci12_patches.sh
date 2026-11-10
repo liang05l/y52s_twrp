@@ -72,7 +72,11 @@ grep -q 'y52s: reusing owner auth token' Decrypt.cpp \
   || fail "0007 marker missing (owner token reuse before unwrap)"
 grep -q 'if (user_id != 0 \&\& auth_token_len == 0)' Decrypt.cpp \
   || fail "0007 hook not placed before unwrap"
-echo "  user999 patch OK (scrypt + profile verify + owner-token fallback)"
+grep -q 'corrected hw_auth_token byte order' Decrypt.cpp \
+  || fail "0007 missing: big-endian hw_auth_token_t fix (auth-bound keys return -26 without it)"
+grep -q 'authToken.userId          = __builtin_bswap64(authToken.userId)' Decrypt.cpp \
+  || fail "0007 missing: upstream unwrap parser SID byte-order conversion"
+echo "  user999 patch OK (scrypt + profile verify + tied credential + BE auth token)"
 
 echo "=== bootable/recovery (MTP default off) ==="
 cd "$WORK/bootable/recovery"
