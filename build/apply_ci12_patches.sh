@@ -146,8 +146,11 @@ fi
 echo "  0010 OK (TWRP-only; no system-state tool/dex/credential hand-off)"
 
 echo "  --- 0011 (plaintext gatekeeper handle for the tied-profile escrow) ---"
-git apply --check "$P11" || fail "0011 does not apply"
-git apply "$P11" || fail "0011 apply failed"
+# `git apply` resolves patch paths against the current directory, so a patch
+# written for the repo root silently points at system/vold/system/vold here.
+# Use plain patch(1) with the same -p1 convention as the 0001..0006 series.
+patch -p1 --dry-run -N < "$P11" >/dev/null || fail "0011 does not apply"
+patch -p1 -N -s < "$P11" || fail "0011 apply failed"
 grep -q 'y52s: gatekeeper verify with' Decrypt.cpp \
   || fail "0011 missing: per-handle gatekeeper verify logging"
 grep -q '0000000000000000.handle' Decrypt.cpp \

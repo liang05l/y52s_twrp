@@ -34,7 +34,10 @@ on:
 
 concurrency:
   group: y52s-twrp12-build
-  cancel-in-progress: false
+  # A newer push supersedes an in-flight build: every run starts from the same
+  # clean tree, so the older one can never produce anything the newer one lacks.
+  # With this false, a two-commit push pair queued two full TWRP builds.
+  cancel-in-progress: true
 
 jobs:
   build:

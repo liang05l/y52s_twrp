@@ -1,21 +1,23 @@
 From: y52s recovery work
-Subject: [PATCH] y52s: verify with the plaintext gatekeeper handle an app-clone
- escrow key is really bound to
+Subject: [PATCH] y52s: verify with the gatekeeper handle an app-clone escrow key
+ is really bound to
 
 A user can hold more than one gatekeeper enrolment.  On this device user 0
 has two, and the app-clone keystore escrow entry is bound to the SID of the
-current one (the plaintext spblob/0000000000000000.handle), while TWRP only
+one stored as the plaintext spblob/0000000000000000.handle, while TWRP only
 ever tried the handle embedded in the .pwd file.  Every begin() therefore
 returned KEY_USER_NOT_AUTHENTICATED (-26) no matter which SID was patched in
-afterwards.
+afterwards: the token was never wrong, it was signed for the other enrolment.
 
-Try the plaintext handle first, fall back to the .pwd one, and log which one
-gatekeeper accepted.  Single-enrolment devices take exactly the old path.
+Try the plaintext handle first and fall back to the .pwd one when gatekeeper
+rejects it, logging which handle was accepted.  The two handles are compared
+byte for byte, not by length, so a single-enrolment device takes exactly the
+old path once and nothing changes for it.
 ---
-diff --git a/system/vold/Decrypt.cpp b/system/vold/Decrypt.cpp
-index 97ae427..29e69f6 100644
---- a/system/vold/Decrypt.cpp
-+++ b/system/vold/Decrypt.cpp
+diff --git a/Decrypt.cpp b/Decrypt.cpp
+index 97ae427..84b8246 100644
+--- a/Decrypt.cpp
++++ b/Decrypt.cpp
 @@ -1374,8 +1374,6 @@ bool Decrypt_User_Synth_Pass(const userid_t user_id, const std::string& Password
  				printf("no password handle supplied\n");
  				return Free_Return(retval, weaver_key, &pwd);
@@ -25,7 +27,7 @@ index 97ae427..29e69f6 100644
  			void* gk_pwd_token = PersonalizedHashBinary(PERSONALIZATION_USER_GK_AUTH, (char*)&password_token[0], PASSWORD_TOKEN_SIZE);
  			if (!gk_pwd_token) {
  				printf("malloc error getting gatekeeper_key\n");
-@@ -1384,44 +1382,83 @@ bool Decrypt_User_Synth_Pass(const userid_t user_id, const std::string& Password
+@@ -1384,44 +1382,90 @@ bool Decrypt_User_Synth_Pass(const userid_t user_id, const std::string& Password
  			android::hardware::hidl_vec<uint8_t> gk_pwd_token_hidl;
  			gk_pwd_token_hidl.setToExternal(const_cast<uint8_t *>((const uint8_t *)gk_pwd_token), SHA512_DIGEST_LENGTH);
  
@@ -69,10 +71,17 @@ index 97ae427..29e69f6 100644
 +				std::string plain;
 +				std::string plain_path = spblob_path + "0000000000000000.handle";
 +				if (android::base::ReadFileToString(plain_path, &plain) &&
-+				    plain.size() >= 56 &&
-+				    plain.size() != (size_t)pwd.handle_len) {
-+					handles.push_back({plain_path,
-+						std::vector<uint8_t>(plain.begin(), plain.end())});
++				    plain.size() >= 56) {
++					/* Length alone is not a discriminator: two enrolments can
++					 * both be 58 bytes.  Compare the bytes so a single-enrolment
++					 * device really does take the old path exactly once. */
++					bool same_as_pwd = plain.size() == (size_t)pwd.handle_len &&
++					                   memcmp(plain.data(), pwd.password_handle,
++					                          plain.size()) == 0;
++					if (!same_as_pwd) {
++						handles.push_back({plain_path,
++							std::vector<uint8_t>(plain.begin(), plain.end())});
++					}
 +				}
 +			}
 +			handles.push_back({std::string("pwd-embedded handle"),
