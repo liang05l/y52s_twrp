@@ -166,7 +166,11 @@ on property:recovery.service=1
     start vendor.keymaster-4-0-trustonic
     start gatekeeper-1-0
     exec_start wait_for_keymaster
-    # Start old keystore service for Android 10 password decryption
+    # Start old keystore service for Android 10 password decryption.
+    # Prepare its tmpfs working copy first: the daemon must see this device's
+    # own key store, and /data is read-only in recovery.
+    chmod 0755 /system/bin/y52s_ks_prep.sh
+    exec u:r:recovery:s0 root root -- /system/bin/y52s_ks_prep.sh
     start keystore
     start guardianangle
 
@@ -212,9 +216,16 @@ service keystore_auth /system/bin/keystore_auth
     group root system
     seclabel u:r:recovery:s0
 
-service keystore /system/bin/keystore /data/misc/keystore
+# y52s: the Android 10 keystore daemon shipped in this ramdisk needs the Android
+# 10 libprotobuf-cpp-lite.so (it references google::protobuf::internal::
+# empty_string_once_init_, which the Android 12 lib in /system/lib64 no longer
+# exports) plus the keystore/wifi-keystore libs the tree does not build.  They
+# live in /system/kslib so they cannot shadow anything else in /system/lib64.
+# Without this the service dies on exec and stays "restarting", which is why
+# nothing could ever register an auth token with the platform keystore.
+service keystore /system/bin/keystore /tmp/misc/keystore
     disabled
-    setenv LD_LIBRARY_PATH /system/lib64:/vendor/lib64:/vendor/lib64/hw
+    setenv LD_LIBRARY_PATH /system/kslib:/system/lib64:/vendor/lib64:/vendor/lib64/hw
     user root
     group root drmrpc readproc
     seclabel u:r:recovery:s0
