@@ -166,12 +166,14 @@ on property:recovery.service=1
     start vendor.keymaster-4-0-trustonic
     start gatekeeper-1-0
     exec_start wait_for_keymaster
-    # Start old keystore service for Android 10 password decryption.
-    # Prepare its tmpfs working copy first: the daemon must see this device's
-    # own key store, and /data is read-only in recovery.
+    # y52s: the Android 10 keystore daemon must run against this device's own
+    # key store, and /data is read-only in recovery, so it gets a tmpfs copy.
+    # /data is NOT mounted yet when recovery.service=1 fires - measured on
+    # device: the prep script logged "no /data/misc/keystore" and the daemon
+    # came up with zero aliases.  Run the prep as a oneshot service that waits
+    # for the mount and starts the daemon itself, so init is never blocked.
     chmod 0755 /system/bin/y52s_ks_prep.sh
-    exec u:r:recovery:s0 root root -- /system/bin/y52s_ks_prep.sh
-    start keystore
+    start y52s_ks_prep
     start guardianangle
 
 # Mobicore TEE Daemon - 之前测试通过的配置
@@ -214,6 +216,15 @@ service keystore_auth /system/bin/keystore_auth
     disabled
     user system
     group root system
+    seclabel u:r:recovery:s0
+
+# y52s: oneshot helper that waits for recovery to mount /data and only then
+# populates the tmpfs keystore copy and starts the daemon.
+service y52s_ks_prep /system/bin/y52s_ks_prep.sh
+    class core
+    disabled
+    oneshot
+    user root
     seclabel u:r:recovery:s0
 
 # y52s: the Android 10 keystore daemon shipped in this ramdisk needs the Android
