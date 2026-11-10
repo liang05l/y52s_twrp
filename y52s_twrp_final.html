@@ -1291,6 +1291,18 @@ y52s: tied-profile keymaster begin failed: -26
 </ul>
 本地严格补丁链预演全绿（BE 标记、SID bswap、tied helper、scrypt、owner fallback、括号配平、keymaster 链接、MTP 默认关）；CI 与验收脚本已同步新标记。提交 <code>b5f027c</code> → <strong>run <code>42751657966</code></strong>（03:47 UTC）。</div>
 
+<h3>18.21 04:13 追加 — 字节序修复镜像构建成功并刷入（等待最后一次 PIN）</h3>
+<div class="block">
+<p><strong>run <code>42751657966</code> 04:13 UTC completed success</strong>。产物 <code>build/ci12v6/recovery.img</code> = <code>f3421a78…</code>（96 MiB）。离线校验全绿：</p>
+<ul>
+  <li>新标记 <code>corrected hw_auth_token byte order</code> 与 <code>tied-profile credential recovered</code> 都编译进 <code>system/bin/recovery</code> + <code>system/lib64/libtar.so</code>；</li>
+  <li>官方 vivo vbmeta（<code>4bdf3ccd…</code> / <code>boot.security_patch=2019-06-06</code>）、<code>os_version=0x14000172</code>、AOSP test key 缺席、3696 个 ramdisk 条目、14 触摸固件、41 trustlet、keymaster@4.0 运行时库、MTP configfs 开关均与上一版一致。</li>
+</ul>
+<p>刷入在 TWRP 内完成（<code>push</code> 2.3 s + <code>dd</code> 0.7 s），<strong>分区回读 <code>f3421a78…</code> 一致</strong>，清 BCB 后 <code>reboot recovery</code>。重启后实测：运行中二进制两个新标记各命中 1 次、<code>installKeyLegacy: SUCCESS</code>、<code>Loading page decrypt_pin</code>、BCB 全 0、<code>sys.usb.config=adb</code>、TWRP <code>3.7.1_12</code>。</p>
+<p><strong>唯一剩下一步：在 TWRP 屏幕输锁屏 PIN。</strong>主用户 0 解密写入机主 <code>/auth_token</code> 后，999 会走 tied-profile 路径。预期日志依次出现：<code>y52s: corrected hw_auth_token byte order: userId=0xc8dbe6498e82c2bb …</code> → <code>begin callback: error=0</code> → <code>y52s: tied-profile credential recovered (80 bytes)</code> → <code>[SECDIS] Gatekeeper verification succeeded</code> → <code>User 999 Decrypted Successfully</code>。<br>
+若 <code>begin</code> 仍 <code>-26</code>，则剩余唯一变量是 AOSP 的 <code>setUserAuthenticationValidityDurationSeconds(30)</code> 时效；新日志会把解析后的 <code>userId</code>、<code>ts</code> 全部打印出来，可以确定性判定，不再需要猜。回退 <code>build/recovery.img</code>（<code>a3855ed4…</code>）始终保留；全程未 format / wipe。</p>
+</div>
+
 <div class="foot">唯一入口：本文件。配置 <code>device/vivo/y52s/</code>，上游对照 <code>reference/</code>，
 证据 <code>device_dump/</code>，命令刷 <code>flash/</code>，TWRP 11 补丁 <code>patches/twrp11/</code>（存档），
 12.1 解密补丁 <code>patches/system_vold/</code>，CI 流水线 <code>build/{prepare_ci12_tree.py,apply_ci12_patches.sh,postprocess_ci12.py}</code>。未列出来源的参数保持 PENDING。</div>
