@@ -40,12 +40,28 @@
  *   cd /tmp/u999 && zip u999.jar classes.dex
  *
  * RUN (device, unlocked Android system, root):
- *   adb push u999.jar /data/local/tmp/u999.jar
- *   adb shell su -c 'app_process -Djava.class.path=/data/local/tmp/u999.jar /system/bin U999Cred'
- *   adb shell su -c 'wc -c /cache/recovery/u999_cred'   # expect 80
  *
+ *   The keystore blob is /data/misc/keystore/user_0/1000_USRPKEY_... : the
+ *   1000_ prefix is the OWNER UID (system_server). AndroidKeyStore resolves
+ *   aliases against the CALLER's UID, so running this as uid 0 (root) finds
+ *   nothing. It MUST run as uid 1000 (system):
+ *
+ *   adb push u999.jar /data/local/tmp/u999.jar
+ *   adb shell chmod 644 /data/local/tmp/u999.jar
+ *   adb shell su 1000 -c 'app_process -Djava.class.path=/data/local/tmp/u999.jar /system/bin U999Cred'
+ *   adb shell su -c 'wc -c /data/local/tmp/u999_cred'      # expect 80
+ *   adb pull /data/local/tmp/u999_cred .cache/u999_cred    # keep it OFF logs
+ *
+ * The credential is NEVER printed. If `su 1000` is unavailable, fall back to
+ * `su -c 'setuidgid 1000 ...'` or run it through a system-uid app_process.
  * On UserNotAuthenticatedException: unlock the lock screen and rerun within
  * 30 s (the auth window is short by design).
+ *
+ * BACK IN TWRP (root shell, no PIN needed to place the file):
+ *   adb push .cache/u999_cred /tmp/y52s_u999_cred
+ *   adb shell chmod 600 /tmp/y52s_u999_cred
+ * Then enter the lock-screen PIN once as usual; patch 0009 reads the file and
+ * TWRP decrypts user 999 by itself. Delete the jar/credential afterwards.
  */
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -85,12 +101,26 @@ public class U999Cred {
             byte[] pwd = cipher.doFinal(ct);
             String p = new String(pwd, "US-ASCII");
 
-            File dst = new File("/cache/recovery/u999_cred");
-            dst.getParentFile().mkdirs();
-            FileOutputStream fo = new FileOutputStream(dst);
-            fo.write(p.getBytes("US-ASCII"));
-            fo.close();
-            System.out.println("Y52S_CRED_OK len=" + p.length());
+            // Write only to root/system-readable paths; NEVER print P.
+            String[] outputs = {
+                "/data/local/tmp/u999_cred",
+                "/cache/recovery/u999_cred"
+            };
+            int written = 0;
+            for (String path : outputs) {
+                try {
+                    File dst = new File(path);
+                    if (dst.getParentFile() != null) dst.getParentFile().mkdirs();
+                    FileOutputStream fo = new FileOutputStream(dst);
+                    fo.write(p.getBytes("US-ASCII"));
+                    fo.close();
+                    written++;
+                } catch (Throwable ignored) {
+                    // /cache may not exist on some builds; the other path is enough.
+                }
+            }
+            if (written == 0) throw new IllegalStateException("no writable output path");
+            System.out.println("Y52S_CRED_OK len=" + p.length() + " outputs=" + written);
         } catch (Throwable t) {
             System.out.println("Y52S_CRED_FAIL " + t);
             t.printStackTrace(System.out);
