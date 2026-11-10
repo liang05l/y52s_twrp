@@ -86,3 +86,5 @@ build/ci12fix/*.img
 !build/ci12v4/
 build/ci12v4/*.img
 !build/ci12v4/recovery.img.sha256
+!flash/probe_keymaster_lifecycle.sh
+!reference/aosp10/LockSettingsService.java

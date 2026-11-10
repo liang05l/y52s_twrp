@@ -1240,6 +1240,18 @@ failed to unwrapSyntheticPasswordBlob</pre>
 <p>刷入沿用 TWRP 内直接 <code>push + dd</code>（2.1 s + 0.7 s），<strong>分区回读 <code>6a8ef71b…</code> 一致</strong>，清 BCB 后 <code>reboot recovery</code>。重启后：运行中二进制能 grep 到两个新标记（各 1 次）、<code>installKeyLegacy: SUCCESS</code>（DE 密钥链完好）、<code>Loading page decrypt_pin</code> / <code>Is encrypted, do decrypt page first</code> 已出现、BCB 全 0、<code>sys.usb.config=adb</code>。</p>
 <div class="block"><strong>唯一剩下一步</strong>：在 TWRP 屏幕上输锁屏 PIN。这次日志会给出<strong>决定性结论</strong>：若出现 <code>[SECDIS] Gatekeeper verification succeeded</code> 且后面跟 <code>User 999 Decrypted Successfully</code>，说明 999 的两处实现缺陷已修好；若出现 <code>y52s: profile verify failed, continuing</code> + <code>gatekeeper verification failed (ret=…)</code>，则可<strong>确定性收尾</strong>：999 的 LSKF 既不是机主 PIN、也不是 AOSP <code>default-password</code>，只能是 vivo 创建分身时设置的独立密码——届时在 TWRP 终端执行 <code>twrp decrypt &lt;分身密码&gt; 999</code> 即可，无需再重编译。回退 <code>a3855ed4…</code> 保留；全程未 format / wipe。</div>
 
+<h3>18.17 「解密完成后 TWRP 会停 keymaster 吗」——查证结果：不会</h3>
+<p>用户提出新假设：主用户 0 解密完成后 TWRP 是否停止 keymaster，导致后续 999 解密失败。三条证据一致否定：</p>
+<table>
+  <tr><th>证据</th><th>结果</th></tr>
+  <tr><td>TWRP 12.1 <code>Post_Decrypt()</code> 源码（<code>reference/twrp12/partitionmanager.cpp</code> 1956 行起）</td><td>只做 <code>SetValue(TW_IS_DECRYPTED,1)</code>、<code>property_set("twrp.decrypt.done","true")</code>、重新 <code>Mount(false)</code> /data、更新存储路径与 UI，<strong>全文没有任何 <code>ctl.stop</code> 或停服务动作</strong></td></tr>
+  <tr><td>本机 <code>init.recovery.mt6853.rc</code></td><td>只有 <code>on late-init → stop keystore2</code> 与 <code>on property:recovery.service=1 → start vendor.keymaster-4-0-trustonic / gatekeeper-1-0 / keystore / guardianangle</code>；<strong>没有任何解密后 stop keymaster 的规则</strong></td></tr>
+  <tr><td>真机实测（<code>flash/probe_keymaster_lifecycle.sh</code>）</td><td><code>ps -A</code> 里 PID 447 <code>android.hardware.keymaster@4.0-service.trustonic</code>、PID 448 <code>android.hardware.gatekeeper@1.0-service</code> 均 <code>binder_thread_read</code> 正常服务；<code>init.svc.gatekeeper-1-0=running</code>；日志全文无 <code>ctl.stop keymaster</code> / stopping 标记。999 的 <code>[Keymaster] begin</code> <strong>确实被调用并返回 -26</strong>，是认证失败而非服务不可用</td></tr>
+</table>
+<p><code>init.svc.keystore=restarting</code> / <code>guardianangle=restarting</code> 确实存在，但 Y73s 补丁走 <code>direct Keymaster HIDL</code>、auth token 直接从 <code>/auth_token</code> 文件读入，不依赖 keystore 服务；主用户 0 成功解密就是证明。</p>
+<p><strong>本轮补丁确实生效</strong>：日志出现 <code>y52s: scrypt password token (credential_len=6)</code>（机主 PIN，仅长度不含内容）与 <code>(credential_len=16)</code>（AOSP <code>default-password</code>）两次，证明 scrypt 修复落地；但两次都 <code>gatekeeper verification failed (ret=-1)</code> → <code>y52s: profile verify failed, continuing to unwrap</code> → <code>y52s: reusing owner auth token (69 bytes) for user 999</code> → <code>begin callback: error=-26</code> → <code>failed to unwrapSyntheticPasswordBlob</code>。</p>
+<div class="block"><strong>结论</strong>：不是 keymaster 生命周期问题。999 的 <code>.pwd</code> gatekeeper handle 对机主 PIN 与 AOSP 默认密码都返回 <code>ERROR_GENERAL(-1)</code>，说明其 LSKF 是 vivo 创建 <code>DOBULE_APP</code> 分身时设置的独立/随机值，TWRP 侧 password-based 解包能修的实现缺陷已全部修完。<br>剩下两条路：① 若知道分身独立密码，TWRP 终端执行 <code>twrp decrypt &lt;密码&gt; 999</code>（现有镜像直接支持，<strong>无需重编译</strong>）；② 从已解锁的系统态 root 导出 999 的 CE 密钥，在 TWRP 里直接装 key 绕过 SP 解包（涉及新脚本，需用户同意后再做）。</div>
+
 <div class="foot">唯一入口：本文件。配置 <code>device/vivo/y52s/</code>，上游对照 <code>reference/</code>，
 证据 <code>device_dump/</code>，命令刷 <code>flash/</code>，TWRP 11 补丁 <code>patches/twrp11/</code>（存档），
 12.1 解密补丁 <code>patches/system_vold/</code>，CI 流水线 <code>build/{prepare_ci12_tree.py,apply_ci12_patches.sh,postprocess_ci12.py}</code>。未列出来源的参数保持 PENDING。</div>
