@@ -1371,6 +1371,51 @@ y52s: all strategies exhausted for tied-profile credential</pre>
   <li>另注：<code>keystore_auth</code> 会 <code>unlink("/auth_token")</code> 并写 <code>/auth_error</code>；本次它消费掉了当前会话的 <code>/auth_token</code>（主用户 0 已解密、CE key 已入内核，不影响已解密数据），下次输 PIN 会重新生成。</li>
 </ul>
 <p><strong>结论</strong>：继续修需要让 <code>keystore</code> 服务跑起来并把 <code>ctl.start keystore_auth</code> 加回解密流程。这至少需要一轮源码编译，且要先拿到原厂 system 分区里的两个 wifi keystore HAL 库。本次<strong>没有</strong>擅自触发编译、刷入或重启；设备仍是 TWRP、分区 <code>373f2c64…</code>、主用户 0 已解密、BCB 全 0，回退 <code>a3855ed4…</code> 保留。</p>
+
+<h3>18.25 14:20 追加 — 补上被漏掉的一半：HAL 的第四条硬条件是「30 秒时效」</h3>
+<p>18.24 把 17 条策略全 <code>-26</code> 归因为「Trustonic 不解析 <code>begin()</code> 传入的 token、只查内部认证表」。重新逐条对照 <code>IKeymasterDevice 4.0 HAL</code>（<code>.cache/IKeymasterDevice_40.hal:928–944</code>）后确认这个推断<strong>不完整</strong>：规范对同时带 <code>Tag::USER_SECURE_ID</code> 与 <code>Tag::AUTH_TIMEOUT</code> 的 key 规定 <code>begin()</code> 必须收到非空 <code>HardwareAuthToken</code>，且四条<strong>全部</strong>成立，否则一律返回 <code>KEY_USER_NOT_AUTHENTICATED (-26)</code>：</p>
+<ol>
+  <li><code>HMAC</code> 字段必须校验通过；</li>
+  <li>key 的 <code>USER_SECURE_ID</code> 至少有一个与 token 中的 secure ID 匹配；</li>
+  <li>key 的 <code>USER_AUTH_TYPE</code> 与 token 的 auth type 匹配；</li>
+  <li><strong>token 必须落在有效期内：<code>ts + AUTH_TIMEOUT &gt;= 当前 secure timestamp</code>（开机单调毫秒）。HAL 原文写作 “must be less than the current secure timestamp”，是规范文档里著名的反向措辞；AOSP 实现与 30 秒窗口语义均为「越新越好」——本机实测陈旧 token 返回 <code>-26</code> 也排除了按字面实现的可能。</strong></li>
+</ol>
+<table>
+  <tr><th>证据</th><th>实测值 / 出处</th><th>含义</th></tr>
+  <tr><td>AOSP <code>LockSettingsService.java:1560–1561</code></td><td><code>setUserAuthenticationRequired(true)</code> + <code>setUserAuthenticationValidityDurationSeconds(30)</code></td><td>profile key 的认证窗口只有 <strong>30 秒</strong></td></tr>
+  <tr><td><code>/tmp/recovery.log</code> 策略表</td><td><code>ts=230090</code>（大端解析后的真实 timestamp）</td><td>token 签发于开机约 <strong>230 秒</strong></td></tr>
+  <tr><td>真机 <code>/proc/uptime</code></td><td><code>2063.41</code> 秒</td><td>设备已开机 <strong>2063 秒</strong>，token 早超时</td></tr>
+  <tr><td>日志行号 852 / 1456</td><td><code>Auth token written</code> 全日志<strong>仅一次</strong>，之后 3 轮 <code>Decrypt_User(999)</code> 都读同一个 69 字节文件</td><td>所有复测都在复用陈旧 token；改任何字节又会破坏 HMAC</td></tr>
+  <tr><td>上游 <code>unwrapSyntheticPasswordBlob()</code> 解析</td><td>challenge/userId/authenticatorId 用 <code>memcpy</code> 不转；<code>authenticatorType=ntohl</code>；<code>timestamp=bswap64</code></td><td>唯一能让 TEE 重新序列化后 HMAC 复算通过的构造；对应策略表 <code>strategy 6</code>，它也是 <code>-26</code> → 反证「字节解释」不是变量</td></tr>
+  <tr><td>0006 补丁回调</td><td><code>fwrite(rsp.data.data(), …, rsp.data.size(), "/auth_token")</code></td><td>文件是 TEE 签发的原始 69 字节，MAC 合法；问题只在<strong>何时</strong>使用</td></tr>
+</table>
+<p><strong>结论修正</strong>：不是「还需要补 keystore 服务」（18.24 的零编译补库链已证伪该路），而是 <strong>TWRP 在 user 0 签发 token 几分钟后才做 999 的 auth-bound <code>begin()</code></strong>。主用户 0 的 SP key 不带 <code>AUTH_TIMEOUT</code>，陈旧 token 被忽略所以能解；999 的 profile key 带 30 秒窗口，必然 <code>-26</code>。这一条同时解释了「不带 token 的 <code>begin()</code> 也是 <code>-26</code>」——不带 token 本来就违反第 1 条。</p>
+
+<h4>18.25.1 一次性修复：把 <code>begin()</code> 挪到 token 刚签发的那一刻（补丁 0008）</h4>
+<p>不改 320 行的 0007，新增一个小补丁 <code>patches/system_vold/0008-y52s-fresh-owner-auth-token.patch</code>，在 0007 之后应用：</p>
+<ul>
+  <li><strong>时序（核心）</strong>：在 <code>Decrypt_User_Synth_Pass(0, PIN)</code> 的 Gatekeeper 回调写完 <code>/auth_token</code> 之后的<strong>同一个成功分支</strong>里，立刻调用 <code>Get_Tied_Profile_Password(999)</code> 做 AES-GCM <code>begin()</code>，把解出的 80 字符随机密码缓存到全局；稍后 <code>Decrypt_User(999)</code> 直接取缓存，用真密码走 999 自己的 gatekeeper → SPBLOB → CE key。</li>
+  <li><strong>构造</strong>：策略 0 固定为上游 <code>unwrapSyntheticPasswordBlob()</code> 的逐字解析（<code>memcpy</code> + <code>ntohl</code> + <code>bswap64</code>），保证 HMAC 复算通过；原 16 条位掩码变体与「不带 token」仍保留作运行期兜底。</li>
+  <li><strong>诊断</strong>：打印 <code>token ts_be</code> / <code>boottime_now_ms</code> / <code>delta_ms</code> 与 <code>AUTH_TIMEOUT=30000</code>，无论成败都能一次判定是否还卡在时效。</li>
+  <li><strong>防回归</strong>：上游解析器逐字不动、禁止 <code>__builtin_bswap64</code> 的 CI 断言保留；用户 0 代码路径不新增任何调用。</li>
+  <li><strong>手动场景</strong>：<code>twrp decrypt &lt;PIN&gt; 999</code> 若无缓存，回退读 <code>/auth_token</code> 并打日志说明原因。</li>
+</ul>
+<p>本地全链预演：<code>0006 基线 → 0007 → 0008</code> 全部 <code>git apply --check/apply</code> 通过，1559 行结果与预期逐字节一致（行尾 CRLF/LF 差异已核实），括号配平，7 个 hunk。CI 断言、产物校验、验收脚本标记同步更新。</p>
+<p><strong>状态（15:25 更新）</strong>：run <code>42770488761</code> <code>completed success</code>（补丁应用步骤 <code>Apply decryption patches</code> 已 success）。产物 <code>build/ci12v10/recovery.img</code> = <code>ad1b22b0…</code>：96 MiB、boot 头 v2、<code>os_version=0x14000172</code>、官方 vivo vbmeta 1728 B @ <code>0x37b2800</code>（<code>2019-06-06</code>）、3702 个 ramdisk 条目、0008 的三个新字符串标记齐备、无 <code>bswap64</code> 回归、SHA256 与 artifact 内 <code>recovery.img.sha256</code> 完全一致。分片 Range 下载（14 × 4 MiB）绕过了单连接被掐断的问题。</p>
+<p>TWRP 内 <code>adb push</code>（2.5 s）+ <code>dd</code>（0.6 s）刷入，分区回读 <code>ad1b22b0…</code> 一致；清 BCB（32 字节全 0）后 <code>reboot recovery</code>。重启确认：运行中 <code>/system/bin/recovery</code> 含 <code>with FRESH owner token</code> / <code>no fresh cached credential</code> / <code>AUTH_TIMEOUT=30000</code> 各 1 处；DE 密钥链就绪（<code>encrypted_key</code>/<code>keymaster_key_blob</code>/<code>secdiscardable</code>）、<code>keymaster_ver=4.x</code>、密码页 <code>decrypt_pin</code> / <code>decrypt_users</code> 加载、<code>sys.usb.config=adb</code>、<code>tw_mtp_enabled=0</code>、BCB 全 0。</p>
+<p><strong>唯一剩余一步：用户在密码页输一次锁屏 PIN</strong>（密码不经过 AI）。后台监控会在 PIN 输入后自动抓取 <code>cached tied-profile credential</code>、<code>token ts_be / delta_ms</code>、<code>User 999 Decrypted</code> 或失败原因，并核对 <code>/data/user/999</code> 是否出现明文目录名。回退镜像始终是 <code>build/recovery.img</code> = <code>a3855ed4…</code>；全程未 format/wipe。</p>
+
+<h3>18.26 16:20 追加 — 18.24 的「system 分区挂不上」其实是挂载参数问题，零编译补库链已打通</h3>
+<p>等待 PIN 期间回头复核 18.24 的死路，结论是<strong>当时判断错了</strong>，不是分区不可读：</p>
+<table>
+  <tr><th>18.24 的记录</th><th>本次实测</th></tr>
+  <tr><td>「<code>/dev/block/mapper/system</code>(dm-2) 在 TWRP 里挂不上」</td><td>dm-2 <strong>本来就已挂载</strong>：<code>/dev/block/dm-2 /apex ext4 rw</code>。用 <code>mount -t ext4 -o <strong>ro</strong> … /mnt/sysro</code> 挂到第二个挂载点，与既有 rw 挂载冲突 → <code>Device or resource busy</code>；改成 <code>-o rw</code> 后<strong>立即成功</strong>。</td></tr>
+  <tr><td>「两个 wifi keystore HAL 库只在原厂 system，路径受阻」</td><td>挂载点 <code>/mnt/sysro2</code> 下原厂 system 根目录完整可见（<code>init.rc</code> / <code>default.prop</code> / <code>system/lib64</code> …），<code>libwifikeystorehal.so</code>(80200 B)、<code>libwifikeystorehalext.so</code>(20784 B) 都在。</td></tr>
+  <tr><td>「零编译补库链在此断开」</td><td>已取回全套原厂 Android 10 keystore 组件（10 个文件，全部 <code>\x7fELF</code> 头 + 字节数与设备一致），存 <code>device/vivo/y52s/prebuilt/official_keystore/</code>；比 18.24 从 TWRP 11 借来的同名库版本更匹配原厂 <code>keystore</code> 二进制。</td></tr>
+</table>
+<p>取回清单：<code>libwifikeystorehal.so</code>、<code>libwifikeystorehalext.so</code>、<code>libkeystore-engine.so</code>、<code>libkeystore_aidl.so</code>、<code>libkeystore_binder.so</code>、<code>libkeystore_parcelables.so</code>、<code>android.system.wifi.keystore@1.0.so</code>、<code>vendor.vivo.hardware.wifi.keystore@1.0.so</code>、原厂 <code>system/bin/keystore</code>(490376 B)、<code>system/etc/init/keystore.rc</code>。dmesg 里 <code>keystore</code>/<code>guardianangle</code> 仍每几秒 <code>exit 1</code>，正是缺这些库。</p>
+<p><strong>意义</strong>：若 0008 的 fresh-token 主路径仍失败（日志会由 <code>delta_ms</code> 确定性指出），下一条「让 <code>keystore</code> 常驻 + <code>keystore_auth</code> 注册 token」路径<strong>不再需要云端编译</strong>——用 <code>build/repack_ramdisk.py</code> 把这批库塞进 ramdisk、按需在 rc 里加触发即可，秒级出镜像。</p>
+<p><strong>本次动作边界</strong>：全程只读（挂载点也是临时 <code>/mnt/sysro2</code>，用完已 <code>umount</code> 并 <code>rmdir</code>，<code>/apex</code> 原挂载未动）；<strong>没有刷入、没有重启、没有替换运行中二进制</strong>。设备仍是 TWRP、分区 <code>ad1b22b0…</code>、U0=U999=0、BCB 全 0。后台 PIN 监控已延长为 8 小时窗口（首次 90 分钟超时仅因尚未输 PIN，不是解密失败）。</p>
 </div>
 
 <div class="foot">唯一入口：本文件。配置 <code>device/vivo/y52s/</code>，上游对照 <code>reference/</code>，
