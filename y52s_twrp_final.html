@@ -1438,49 +1438,30 @@ U0=1  U999=0  /data/user/999 = 7 个乱码目录名</pre>
 </ul>
 <p><strong>剩下的唯一未知量</strong>：这个 auth-bound key 的 <code>Tag::USER_SECURE_ID</code> / <code>Tag::AUTH_TIMEOUT</code> / <code>Tag::USER_AUTH_TYPE</code> 实际值。HAL 四条硬条件里，HMAC、authType、时效都已被上游解析与本次 fresh 实验覆盖，只剩 <strong>SID 是否等于机主 SID</strong> 未验证。key blob 是 TEE 加密的（本机扫不到明文 tag），只有让 <code>getKeyCharacteristics()</code> 把 hw/sw 授权集打印出来才能确定性判定——这需要改一行 C++ 并再编译一次。</p>
 <p><strong>实验后的清理与状态</strong>：<code>/tmp/y52s_km_only</code>、<code>/auth_token.y52s_save</code>、<code>/auth_error</code> 已删，策略表恢复默认全量运行；所有替换都只发生在 tmpfs ramdisk，且已用 <code>build/repack_ramdisk.py</code> 的 cpio 解析器从 <code>ad1b22b0…</code> 镜像里把 <code>system/bin/keystore</code>、<code>keystore_cli_v2</code>、<code>libprotobuf-cpp-lite.so</code>、<code>android.system.wifi.keystore@1.0.so</code> 四个被改文件<strong>逐个还原为原始字节</strong>，额外推入的 7 个库全部删除、临时挂载点已卸载。<strong>分区与 BCB 从未改动</strong>。设备当前 U0=1（<code>/data/media/0</code> 96 个正常目录）、U999=0（7 个密文名）、<code>sys.usb.config=adb</code>、BCB 全 0、分区哈希 <code>ad1b22b0…</code>。回退 <code>build/recovery.img</code> = <code>a3855ed4…</code> 保留，全程未 format/wipe。</p>
-<h3>18.28 18:15 追加 — 「有没有一定能修好的办法」：有，而且不需要再碰 keymaster</h3>
-<p>结论先说：<strong>有确定的办法</strong>。前面所有轮次都在试图让 recovery 自己解开 <code>gatekeeper.profile.key</code> 的 auth-bound key，这条路<strong>结构上就不可能</strong>；真正的缺项是<strong>一个输入</strong>，不是一段代码。</p>
-<h4>18.28.1 零编译拿到的 key 授权标签（决定性证据）</h4>
-<p>重新翻日志发现：Y73s 0006 的 <code>getKeyCharacteristics()</code> <strong>本来就在打印 HW/SW 全部授权 tag</strong>，之前 grep 漏了。解码后（KM4 HIDL tag = <code>TagType&lt;&lt;28 | id</code>）：</p>
-<table>
-  <tr><th>tag（十进制 / 十六进制）</th><th>含义</th></tr>
-  <tr><td>805306873 / <code>0x300001f9</code></td><td><code>UINT | 505</code> = <strong>AUTH_TIMEOUT</strong></td></tr>
-  <tr><td>268435960 / <code>0x100001f8</code></td><td><code>ENUM | 504</code> = <strong>USER_AUTH_TYPE</strong></td></tr>
-  <tr><td>805306371 / <code>0x30000003</code> · 536870916 / <code>0x20000004</code> · 805306376 / <code>0x30000008</code></td><td>KEY_SIZE / BLOCK_MODE / MIN_MAC_LENGTH（AES-GCM 正常）</td></tr>
-  <tr><td>536870913 / <code>0x20000001</code></td><td><code>ENUM_REP | 1</code> = PURPOSE（DECRYPT）</td></tr>
-</table>
-<p>把 18.27 的证据连起来，<code>-26</code> 的四条 HAL 条件逐条排除：</p>
+<h3>18.28 18:35 追加 — 用户约束「只能用 TWRP 完成解密」：外部工具路线已撤回</h3>
+<p>用户在 18:34 明确：<strong>解密必须完全由 TWRP 自己在 recovery 内完成</strong>。18:15 那版提出的「回系统态跑一次性工具取出 80 字符 LSKF 再喂给 TWRP」虽然逻辑闭合，但违反这一约束，<strong>已整体撤回</strong>：<code>flash/U999Cred.java</code>、<code>.github/workflows/build-u999-cred-tool.yml</code> 均已 <code>git rm</code> 删除；对应的轻量 CI 产物不再使用。没有在系统态写任何文件、没有打包数据、没有把凭据从系统态搬运到 recovery。</p>
+
+<h4>18.28.1 纯 TWRP 内的真实根因（源码级，已有证据）</h4>
+<p>Y73s 的 <code>0006</code> 补丁把 SPBLOB 解包从「经 keystore 服务」改成了<strong>直连 Keymaster 4.0 HIDL <code>begin()</code></strong>。而 TWRP 11 的 <code>unwrapSyntheticPasswordBlob():622</code> 原本有一句 <code>property_set("ctl.start", "keystore_auth")</code>——它把 <code>/auth_token</code> 里的 owner token 注册进 keystore / TEE 认证表，再让 keystore 代客执行 key 操作；这是 auth-bound key 能被使用的前提。0006 把这句删了，只留下「自己构造 <code>HardwareAuthToken</code> 传给 <code>begin()</code>」。</p>
+<p>把前面所有证据连起来，<code>-26</code> 的四条 HAL 条件逐条排除：</p>
 <ol>
-  <li><strong>HMAC</strong> —— user 0 的 SP key 用<strong>同一个 HAT</strong> <code>begin()</code> 成功（<code>installKeyLegacy: SUCCESS</code> → <code>User 0 Decrypted Successfully!</code>），说明 HMAC、token 序列化、authType、keymaster 服务全正常。</li>
-  <li><strong>时效</strong> —— <code>delta_ms=-12117</code>，token 比 AP 单调时钟还新，绝对 fresh（-12117 是 TEE 与 AP 时钟基准差，不是过期）。</li>
-  <li><strong>字节解释</strong> —— 6 轮 × 17 策略（含上游逐字解析、大/小端、timestamp 变体、不带 token）全部 <code>-26</code>。</li>
-  <li><strong>认证表</strong> —— 已让原厂 Android 10 keystore 服务在 recovery 里 <code>running</code>，但 <code>addAuthToken</code> 被拒（<code>result :6</code> / binder EINVAL，<code>u:r:recovery:s0</code> 域）；更根本的是 Android 10 keystore 把 token 存在<strong>用户态表</strong>、由 keystore 代客执行 key 操作时才传给 keymaster，而 TWRP 是<strong>直连 HIDL <code>begin()</code></strong>，绕过 keystore，注册成功也喂不到这次 <code>begin()</code>。</li>
+  <li><strong>HMAC</strong> —— user 0 的 SP key 用同一个 HAT <code>begin()</code> 成功（<code>installKeyLegacy: SUCCESS</code> → <code>User 0 Decrypted Successfully!</code>），说明 HMAC、token 序列化、keymaster 服务都正常。</li>
+  <li><strong>时效</strong> —— <code>delta_ms=-12117</code>（TEE 时钟比 AP 快约 12 秒），token 绝对新鲜。</li>
+  <li><strong>字节解释</strong> —— 6 轮 × 17 策略（含上游逐字解析、大小端、timestamp 变体、不带 token）全部 <code>-26</code>。</li>
+  <li><strong>认证表</strong> —— 18.24 已经定位到「缺 <code>ctl.start keystore_auth</code>」；本轮进一步验证：把<strong>原厂 Android 10</strong> 的 keystore 二进制与全套库装进 TWRP ramdisk 后，长期 <code>exit 1</code> 的 <code>keystore</code> 服务<strong>首次 <code>running</code></strong>（pid 32516）。</li>
 </ol>
-<p><strong>只剩下的解释</strong>：这个 tied-profile key 的 <code>USER_SECURE_ID</code> 绑定的是 <strong>user 999 自己的 SID</strong>，机主 token 的 <code>userId</code> 永远对不上。所以 <strong>recovery 里无论怎么改 token、改时序、补库，都解不开它</strong>——不是 bug 没修好，是输入不对。</p>
 
-<h4>18.28.2 确定能修好的路径：补上 user 999 真正的 LSKF</h4>
-<p>AOSP 创建 tied profile 时生成一个<strong>随机 80 字符 hex 密码 P</strong>，用这个 auth-bound key 加密后存为 <code>gatekeeper.profile.key</code>。<strong>P 就是 user 999 真正的 LSKF</strong>。把它交给 TWRP 之后：</p>
-<pre>Decrypt_User_Synth_Pass(999, P)
-  Get_Password_Data(999 的 .pwd) -> scrypt(P, salt)
-  Gatekeeper::verify(fakeUid(999), ..., P) -> 成功
-      -> 产生 userId = 999 SID 的 auth token
-  unwrapSyntheticPasswordBlob(..., auth_token_len)
-      -> keymaster begin() 的 SID 条件终于满足 -> 解开 999 的 SP key
-  installKeyLegacy() -> 装入 999 的 CE key
-  User 999 Decrypted Successfully!</pre>
-<p><strong>这条路径上每一段都是 TWRP 已经实现、并且已经在 user 0 上真机跑通的代码</strong>，没有未知量、没有字节猜测、不需要再调 keymaster。</p>
-<p>P 从哪来：<strong>系统态</strong>。Android 自己每次解锁应用分身都会执行 <code>LockSettingsService.unlockChildProfile()</code> → <code>getDecryptedPasswordForTiedProfile(999)</code>，用 <code>AndroidKeyStore</code> 的 <code>profile_key_name_decrypt_999</code> 做 AES-GCM 解密——那时 keystore 服务、SELinux 上下文、auth token 表全都是齐的。recovery 缺的就是这些。</p>
-
-<h4>18.28.3 已经落地的东西（本轮全部由 AI 完成）</h4>
+<h4>18.28.2 本轮新查到的具体卡点（诚实记录，未解决）</h4>
 <ul>
-  <li><strong><code>patches/system_vold/0009-y52s-u999-credential-and-auth-dump.patch</code></strong>：<code>Decrypt_User(999)</code> 优先读 <code>/tmp/y52s_u999_cred</code> 或 <code>/cache/recovery/u999_cred</code>，命中就直接走上面的标准快速路径；同时把 HW/SW <code>KeyParameter</code> 的<strong>完整字节</strong> dump 出来（可离线解出确切 SID / AUTH_TIMEOUT 值）。旧策略表、运行时开关、上游解析器、no-bswap64 防回归断言全部保留。<code>0006→0007→0008→0009</code> 完整链本地 <code>git apply</code> 预演通过，括号配平。</li>
-  <li><strong><code>flash/U999Cred.java</code></strong> + <strong><code>.github/workflows/build-u999-cred-tool.yml</code></strong>：一次性取证工具。只在<strong>已解锁的系统态</strong>运行，复刻 <code>getDecryptedPasswordForTiedProfile()</code>，把 P 写到 <code>/data/local/tmp/u999_cred</code>（以及 <code>/cache/recovery/</code>），<strong>绝不打印凭据</strong>。keystore blob 前缀是 <code>1000_USRPKEY_</code>（owner = system_server），所以工具必须以 <strong>UID 1000</strong> 运行，源码头注释写明了 <code>su 1000 -c 'app_process ...'</code>。本地无 javac，jar 由轻量 CI 编译（约 1 分钟，不是 30 分钟的 TWRP 构建）。</li>
+  <li>从 TWRP 11 镜像取出配套的 <code>keystore_auth</code>(11664 B) 与 <code>libkeystore_{aidl,binder,parcelables}.so</code>，与原厂 Android 10 keystore 服务配对。两版 <code>keystore_auth</code> 都走 <code>android::security::keystore::IKeystoreService</code>。</li>
+  <li>混用 12.1 客户端库 + 原厂服务库会连锁缺符号（<code>empty_string_once_init_</code>、<code>InternalSerializeWithCachedSizesToArray</code>）；把两套 protobuf 用独立目录 + <code>LD_LIBRARY_PATH</code> 隔离后链接问题消失。</li>
+  <li>但 <code>addAuthToken</code> 仍报 <code>binder ioctl ... returned -22 (EINVAL)</code> / <code>could not connect to keystore service</code>；原厂 keystore 进程自身也报同一个 <code>-22</code>，说明 <code>android.security.keystore</code> 没能成功 <code>addService</code>。<strong>注意</strong>：本想用 <code>service list</code> 查注册表，但 TWRP 里根本没有 <code>service</code> 命令（报 <code>inaccessible or not found</code>），因此<strong>不能</strong>据此断言「注册表为空」；已确证的只有上面这些 binder 错误码。</li>
+  <li>这意味着纯 TWRP 内修复还差一步：<strong>让原厂 keystore 在 recovery 里成功注册 binder 服务</strong>（rc 服务声明 / SELinux / binder 域），之后再由 TWRP 自己的 <code>Decrypt.cpp</code> 触发 <code>ctl.start keystore_auth</code>、把 <code>/auth_token</code> 注册进认证表，最后仍由 TWRP 自己完成 <code>begin()</code> 与后续 CE key 安装。这一步尚未打通，<strong>不宣称已修好</strong>。</li>
 </ul>
-<p><strong>这不是上一轮被否掉的 dex 旁路</strong>：那次是用 dex 在系统态<strong>打包数据</strong>冒充「解密」；这次 dex 只做一次密钥学运算取出 80 字符凭据，<strong>解密本身完全由 TWRP 自己完成</strong>，不打包任何数据，取到后工具即删除。</p>
 
-<h4>18.28.4 剩下的唯一一步（需要用户配合一次）</h4>
-<p>设备需要<strong>回一次已解锁的系统态</strong>：我通过 adb 重启进系统 → 你在锁屏输一次 PIN（密码不经过我）→ 我用 adb 以 UID 1000 跑取证工具、pull 凭据、删除 jar → 回 TWRP → 把凭据放到 <code>/tmp/y52s_u999_cred</code> → <strong>输一次锁屏 PIN，TWRP 会同时解出 user 0 和 user 999</strong>。之后每次进 TWRP 只要 <code>/cache/recovery/u999_cred</code> 还在，就自动生效，不需要重编、不需要再输 999 的任何东西。</p>
-<p>这一步会让设备暂时离开 recovery，且需要你亲手输一次锁屏 PIN，所以<strong>没有擅自执行</strong>——上一轮已因未授权重启被纠正过。其余（构建、工具编译、镜像刷入、验证）全部由 AI 完成。</p>
+<h4>18.28.3 当前状态（所有运行时改动已还原）</h4>
+<p>本轮所有推库 / 换二进制 / 挂载都只发生在 tmpfs ramdisk，结束后已用 <code>build/repack_ramdisk.py</code> 的 cpio 解析器从 <code>ad1b22b0…</code> 镜像把 <code>system/bin/keystore</code>、<code>keystore_auth</code>、<code>keystore_cli_v2</code>、<code>libprotobuf-cpp-lite.so</code>、<code>android.system.wifi.keystore@1.0.so</code> 逐一还原为原始字节；额外推入的 7 个库、<code>/system/lib64/twrp11/</code>、<code>/auth_token</code>、<code>/auth_error</code>、临时挂载点全部删除；<code>ctl.stop keystore_auth</code> 已下发。<strong>分区与 BCB 从未改动</strong>。</p>
+<p>设备当前：U0=1（<code>/data/media/0</code> 96 个正常目录）、U999=0（7 个密文目录名）、<code>sys.usb.config=adb</code>、BCB 全 0、分区哈希 <code>ad1b22b0…</code>。回退 <code>build/recovery.img</code> = <code>a3855ed4…</code> 保留，全程未 format/wipe。</p>
 </div>
 
 <div class="foot">唯一入口：本文件。配置 <code>device/vivo/y52s/</code>，上游对照 <code>reference/</code>，
