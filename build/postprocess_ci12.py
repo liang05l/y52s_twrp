@@ -183,7 +183,31 @@ def main():
     # from the working image into the freshly compiled ramdisk. Only the
     # freshly COMPILED binaries (system/bin/recovery, libtar.so, ...) are kept.
     root = os.path.join(v52, "recovery/root")
-    added = replaced = 0
+    added = replaced = madedirs = 0
+
+    def ensure_dirs(name):
+        """Create the cpio directory entries a new file needs.
+
+        init's cpio unpacker only creates directories it finds as explicit
+        070701 entries; it will not mkdir a missing parent for a file, it just
+        fails that one entry and carries on.  A device-tree overlay that adds a
+        brand-new directory therefore loses every file under it, silently -
+        which is exactly what happened to system/kslib (the nine keystore
+        libraries were in the archive but never on disk, so the service kept
+        exiting with status 1).  Emit the parents first, in path order.
+        """
+        made = 0
+        cur = ""
+        for part in name.split("/")[:-1]:
+            cur = part if not cur else cur + "/" + part
+            if cur in by:
+                continue
+            e = new_entry(cur, b"", 0o040755, tpl)
+            ents.append(e)
+            by[cur] = e
+            made += 1
+        return made
+
     for base, _dirs, files in os.walk(root):
         for f in sorted(files):
             full = os.path.join(base, f)
@@ -193,12 +217,14 @@ def main():
                 by[name]["data"] = data
                 replaced += 1
             else:
+                madedirs += ensure_dirs(name)
                 e = new_entry(name, data, 0o100755 if f.endswith(".sh") or
                               "/bin/" in name else 0o100644, tpl)
                 ents.append(e)
                 by[name] = e
                 added += 1
-    print("Y52s ramdisk assets: replaced=%d added=%d" % (replaced, added))
+    print("Y52s ramdisk assets: replaced=%d added=%d dirs=%d" %
+          (replaced, added, madedirs))
 
     # --- 4b) Keymaster 4.0 HIDL runtime libraries ---------------------------
     # The Android.mk patch adds android.hardware.keymaster@4.0 to
@@ -260,6 +286,25 @@ on property:sys.usb.ffs.mtp.ready=0
         by["system/bin/vts_app_recovery"]["data"] = open(vts, "rb").read()
 
     # --- 6) rebuild cpio + boot image ---------------------------------------
+    # Normalise before packing: every file entry must be preceded by explicit
+    # directory entries for all of its ancestors.  init's cpio unpacker never
+    # mkdirs a missing parent - it drops that one entry and moves on - so any
+    # directory that only exists because the device-tree overlay introduced it
+    # would lose its whole content without a single error line.
+    ordered, seen = [], set()
+    for e in ents:
+        cur = ""
+        for part in e["name"].split("/")[:-1]:
+            cur = part if not cur else cur + "/" + part
+            if cur not in seen:
+                seen.add(cur)
+                ordered.append(new_entry(cur, b"", 0o040755, tpl))
+        ordered.append(e)
+        seen.add(e["name"])
+    if len(ordered) != len(ents):
+        print("cpio dir normalisation: +%d directory entries" % (len(ordered) - len(ents)))
+    ents = ordered
+
     cpio = cpio_build(ents)
     gz = gzip.compress(cpio, mtime=0)
     kernel = open(os.path.join(v52, "prebuilt/kernel"), "rb").read()
