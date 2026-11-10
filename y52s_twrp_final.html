@@ -1416,6 +1416,28 @@ y52s: all strategies exhausted for tied-profile credential</pre>
 <p>取回清单：<code>libwifikeystorehal.so</code>、<code>libwifikeystorehalext.so</code>、<code>libkeystore-engine.so</code>、<code>libkeystore_aidl.so</code>、<code>libkeystore_binder.so</code>、<code>libkeystore_parcelables.so</code>、<code>android.system.wifi.keystore@1.0.so</code>、<code>vendor.vivo.hardware.wifi.keystore@1.0.so</code>、原厂 <code>system/bin/keystore</code>(490376 B)、<code>system/etc/init/keystore.rc</code>。dmesg 里 <code>keystore</code>/<code>guardianangle</code> 仍每几秒 <code>exit 1</code>，正是缺这些库。</p>
 <p><strong>意义</strong>：若 0008 的 fresh-token 主路径仍失败（日志会由 <code>delta_ms</code> 确定性指出），下一条「让 <code>keystore</code> 常驻 + <code>keystore_auth</code> 注册 token」路径<strong>不再需要云端编译</strong>——用 <code>build/repack_ramdisk.py</code> 把这批库塞进 ramdisk、按需在 rc 里加触发即可，秒级出镜像。</p>
 <p><strong>本次动作边界</strong>：全程只读（挂载点也是临时 <code>/mnt/sysro2</code>，用完已 <code>umount</code> 并 <code>rmdir</code>，<code>/apex</code> 原挂载未动）；<strong>没有刷入、没有重启、没有替换运行中二进制</strong>。设备仍是 TWRP、分区 <code>ad1b22b0…</code>、U0=U999=0、BCB 全 0。后台 PIN 监控已延长为 8 小时窗口（首次 90 分钟超时仅因尚未输 PIN，不是解密失败）。</p>
+
+<h3>18.27 17:00 追加 — 真机判定：0008 的「30 秒时效」修复被证伪，但拿到了决定性诊断</h3>
+<p>用户输 PIN 后的完整日志（脱敏）：</p>
+<pre>token ts_be=9063359 boottime_now_ms=9051242 delta_ms=-12117 AUTH_TIMEOUT=30000
+strategy 0 [be64=0 be32=0 ts_alt=0 u_alt=0] userId=0xbbc2828e49e6dbc8 type=1 ts=9063359
+strategy 0 begin failed: -26
+... strategy 1..16 全部 -26 ...
+cached tied-profile credential (0 bytes) with FRESH owner token
+no fresh cached credential, falling back to /auth_token
+[SECDIS] Gatekeeper verification succeeded
+User 0 Decrypted Successfully!   /data/media/0 = 96 正常目录
+U0=1  U999=0  /data/user/999 = 7 个乱码目录名</pre>
+<p><strong>结论 1：时效假设被真机否定。</strong><code>delta_ms=-12117</code> 表示 TEE 签发的 token 时间戳比 AP 单调时钟还<strong>新约 12 秒</strong>（TEE 与 AP 时钟基准不同），token 绝对新鲜；0008 把 <code>begin()</code> 挪到 Gatekeeper 回调之后确实执行了（<code>cached tied-profile credential … with FRESH owner token</code> 出现），策略 0 也确实是上游规范构造（<code>type=1</code>、<code>ts=9063359</code>、userId 原样）——<strong>仍然 <code>-26</code></strong>。6 轮 × 17 条策略全部 <code>-26</code>，<code>SUCCEEDED</code> 0 次。18.25 的归因不成立，诚实记为证伪。</p>
+<p><strong>结论 2：零编译 keystore 链走到底了，仍被挡住。</strong>本轮用 18.26 取到的原厂组件在<strong>运行中的 ramdisk（tmpfs）</strong>里做了一次完整实验，不刷入、不重启、不需要再输 PIN：</p>
+<ul>
+  <li>补齐 7 个库 + 原厂 <code>libprotobuf-cpp-lite.so</code>（12.1 版缺 <code>empty_string_once_init_</code>），并把 <code>keystore</code> 二进制与 <code>libkeystore_*</code> 全换成<strong>同一套原厂 Android 10</strong> 组件后，长期 <code>exit 1</code> 的 <code>keystore</code> 服务<strong>首次 <code>running</code></strong>（pid 28248）。单纯混用 TWRP 11 / 12.1 库会连锁缺符号，整套同源才成立。</li>
+  <li><code>keystore_auth</code> 随之能连上服务并调用 <code>addAuthToken</code>，但返回 <code>result :6</code>（binder ioctl <code>-22</code>）；<code>/init.recovery.platform.rc</code> 里它跑在 <code>user system / seclabel u:r:recovery:s0</code>，原厂 keystore 的 <code>keystore_key:add_auth</code> SELinux 检查会拒绝该域。</li>
+  <li>把 <code>/tmp/y52s_km_only=16</code> 只跑「完全不带 token 的 <code>begin()</code>」，并触发 <code>twrp decrypt default_password 999</code>（用任意密码即可触发 helper，不需要真 PIN）：<strong>依旧 <code>-26</code></strong>。</li>
+  <li>更根本的一点：Android 10 的 <code>KeystoreService::addAuthToken</code> 是把 token 存在 <strong>keystore 用户态表</strong>里、由 keystore 代客执行 key 操作时再传给 keymaster；而 TWRP/Y73s 的 <code>Decrypt.cpp</code> 是<strong>直连 Keymaster 4.0 HIDL</strong> 调 <code>begin()</code>，绕过 keystore。所以即便注册成功，也喂不到这次的 <code>begin()</code>。18.24 的「TEE 内部表」推断至此也没有得到支持。</li>
+</ul>
+<p><strong>剩下的唯一未知量</strong>：这个 auth-bound key 的 <code>Tag::USER_SECURE_ID</code> / <code>Tag::AUTH_TIMEOUT</code> / <code>Tag::USER_AUTH_TYPE</code> 实际值。HAL 四条硬条件里，HMAC、authType、时效都已被上游解析与本次 fresh 实验覆盖，只剩 <strong>SID 是否等于机主 SID</strong> 未验证。key blob 是 TEE 加密的（本机扫不到明文 tag），只有让 <code>getKeyCharacteristics()</code> 把 hw/sw 授权集打印出来才能确定性判定——这需要改一行 C++ 并再编译一次。</p>
+<p><strong>实验后的清理与状态</strong>：<code>/tmp/y52s_km_only</code>、<code>/auth_token.y52s_save</code>、<code>/auth_error</code> 已删，策略表恢复默认全量运行；库/二进制替换都只发生在 tmpfs ramdisk，<strong>重启即自动还原为 <code>ad1b22b0…</code> 镜像原样</strong>，分区与 BCB 从未改动。设备当前 U0=1（<code>/data/media/0</code> 96 个正常目录）、U999=0（7 个密文名）、<code>sys.usb.config=adb</code>、BCB 全 0、分区哈希 <code>ad1b22b0…</code>。回退 <code>build/recovery.img</code> = <code>a3855ed4…</code> 保留，全程未 format/wipe。</p>
 </div>
 
 <div class="foot">唯一入口：本文件。配置 <code>device/vivo/y52s/</code>，上游对照 <code>reference/</code>，
