@@ -219,8 +219,10 @@ jobs:
               'user999 AOSP unified-challenge tied-profile patch marker missing from ramdisk'
           assert b'y52s: reusing owner auth token' in d, \
               'user999 owner-token fallback marker missing from ramdisk'
-          assert b'corrected hw_auth_token byte order' in d, \
-              'hw_auth_token_t big-endian fix marker missing from ramdisk'
+          assert b'tied auth token aligned with upstream' in d, \
+              'helper auth-token parser alignment marker missing from ramdisk'
+          assert b'__builtin_bswap64' not in d, \
+              'REGRESSION: bswap64 on auth token breaks user 0 decryption'
           assert b'PD2057' in d, 'PD2057 props missing'
           assert b'android.hardware.keymaster@4.0.so' in d, \
               'keymaster 4.0 HIDL runtime lib missing from ramdisk'

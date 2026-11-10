@@ -100,3 +100,4 @@ build/ci12v5/*.img
 !build/ci12v6/
 build/ci12v6/*.img
 !build/ci12v6/recovery.img.sha256
+!flash/probe_regression.sh

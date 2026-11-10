@@ -72,11 +72,17 @@ grep -q 'y52s: reusing owner auth token' Decrypt.cpp \
   || fail "0007 marker missing (owner token reuse before unwrap)"
 grep -q 'if (user_id != 0 \&\& auth_token_len == 0)' Decrypt.cpp \
   || fail "0007 hook not placed before unwrap"
-grep -q 'corrected hw_auth_token byte order' Decrypt.cpp \
-  || fail "0007 missing: big-endian hw_auth_token_t fix (auth-bound keys return -26 without it)"
-grep -q 'authToken.userId          = __builtin_bswap64(authToken.userId)' Decrypt.cpp \
-  || fail "0007 missing: upstream unwrap parser SID byte-order conversion"
-echo "  user999 patch OK (scrypt + profile verify + tied credential + BE auth token)"
+grep -q 'tied auth token aligned with upstream' Decrypt.cpp \
+  || fail "0007 missing: helper auth-token parser must mirror upstream verbatim"
+grep -q '0x00000000FF000000ULL) << 8' Decrypt.cpp \
+  || fail "0007 missing: complete 8-term timestamp byte swap in helper"
+# REGRESSION GUARD: run 42751657966 proved that byte-swapping
+# authToken.userId makes user 0 fail with -26 on this Trustonic TEE.
+# The upstream unwrapSyntheticPasswordBlob() parser must stay untouched.
+if grep -q '__builtin_bswap64' Decrypt.cpp; then
+  fail "REGRESSION: any bswap64 on auth token breaks user 0 decryption"
+fi
+echo "  user999 patch OK (scrypt + profile verify + tied credential + upstream-aligned token)"
 
 echo "=== bootable/recovery (MTP default off) ==="
 cd "$WORK/bootable/recovery"
