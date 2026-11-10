@@ -72,17 +72,21 @@ grep -q 'y52s: reusing owner auth token' Decrypt.cpp \
   || fail "0007 marker missing (owner token reuse before unwrap)"
 grep -q 'if (user_id != 0 \&\& auth_token_len == 0)' Decrypt.cpp \
   || fail "0007 hook not placed before unwrap"
-grep -q 'tied auth token aligned with upstream' Decrypt.cpp \
-  || fail "0007 missing: helper auth-token parser must mirror upstream verbatim"
-grep -q '0x00000000FF000000ULL) << 8' Decrypt.cpp \
-  || fail "0007 missing: complete 8-term timestamp byte swap in helper"
-# REGRESSION GUARD: run 42751657966 proved that byte-swapping
-# authToken.userId makes user 0 fail with -26 on this Trustonic TEE.
-# The upstream unwrapSyntheticPasswordBlob() parser must stay untouched.
+grep -q 'y52s: STRATEGY' Decrypt.cpp \
+  || fail "0007 missing: runtime keymaster strategy table"
+grep -q 'y52s_km_only' Decrypt.cpp \
+  || fail "0007 missing: runtime strategy override file"
+grep -q 'strategy <= 16' Decrypt.cpp \
+  || fail "0007 missing: full strategy 0..16 coverage"
+# REGRESSION GUARD: run 42751657966 proved that touching the upstream
+# unwrapSyntheticPasswordBlob() token parser makes user 0 fail with -26.
+# The upstream parser must stay byte-for-byte unchanged.
+grep -q 'memcpy(&authToken.userId, p, 8); p += 8;' Decrypt.cpp \
+  || fail "REGRESSION: upstream auth token parser was modified"
 if grep -q '__builtin_bswap64' Decrypt.cpp; then
   fail "REGRESSION: any bswap64 on auth token breaks user 0 decryption"
 fi
-echo "  user999 patch OK (scrypt + profile verify + tied credential + upstream-aligned token)"
+echo "  user999 patch OK (runtime strategy table 0..16, upstream parser untouched)"
 
 echo "=== bootable/recovery (MTP default off) ==="
 cd "$WORK/bootable/recovery"

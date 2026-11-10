@@ -1303,6 +1303,31 @@ y52s: tied-profile keymaster begin failed: -26
 若 <code>begin</code> 仍 <code>-26</code>，则剩余唯一变量是 AOSP 的 <code>setUserAuthenticationValidityDurationSeconds(30)</code> 时效；新日志会把解析后的 <code>userId</code>、<code>ts</code> 全部打印出来，可以确定性判定，不再需要猜。回退 <code>build/recovery.img</code>（<code>a3855ed4…</code>）始终保留；全程未 format / wipe。</p>
 </div>
 
+<h3>18.22 13:00 追加 — 「一次修成功」的方法：试错搬进运行期 + 本地重打包</h3>
+<p>用户的批评成立：每轮「改一个假设 → 云端编译 27 分钟 → 刷入 → 输 PIN」只能验证一件事。本轮改变了方法本身，目标是<strong>只编译一次</strong>。</p>
+
+<h4>18.22.1 零编译验证的结果（已做，结论是否定的）</h4>
+<p>TWRP 里本来就有 <code>/system/bin/keystore_auth</code>（strings：<code>successfully added auth token to keystore</code>），Y73s 0006 补丁注释也写着「use keystore_auth service」，但补丁后的 <code>Decrypt.cpp</code> 里<strong>没有任何 <code>ctl.start</code></strong>；rc 里服务是 <code>disabled</code> 且无 trigger。手动验证：</p>
+<pre>ctl.start keystore_auth -> init.svc.keystore_auth = restarting
+/system/bin/keystore_auth -> CANNOT LINK EXECUTABLE: library "libkeystore_aidl.so" not found
+/system/bin/keystore /data/misc/keystore -> CANNOT LINK EXECUTABLE:
+    library "vendor.vivo.hardware.wifi.keystore@1.0.so" not found</pre>
+<p>两个库都不在已验证镜像的 ramdisk 里（只有 <code>android.system.wifi.keystore@1.0.so</code>，名字不同）。而 Keymaster 4.0 HAL（LineageOS 17.1 <code>IKeymasterDevice.hal</code>）的 <code>begin()</code> 直接带 <code>HardwareAuthToken</code> 参数，<strong>全文 0 处 <code>addAuthToken</code></strong>（那是 3.0 接口）——所以"先注册 token"这条路在 4.0 上不存在，补库也不是可靠修复。<strong>不再为它换一轮编译。</strong></p>
+
+<h4>18.22.2 TWRP 里到底能不能读到 999 的东西</h4>
+<p>只读取证（主用户 0 已解密时）：<strong>解密所需材料全部可读</strong> —— <code>gatekeeper.profile.key</code> 108 B、<code>1000_USRPKEY_profile_key_name_decrypt_999</code> 248 B、<code>spblob/0000000000000000.handle</code> 58 B、<code>user_keys/ce/999/current/{encrypted_key,secdiscardable}</code> 92 B / 16384 B、<code>/auth_token</code> 69 B。<strong>999 的数据读不了</strong>：<code>/data/user/999</code> 7 个乱码名、<code>/data/system_ce/999</code> 乱码、<code>/data/media/999</code> 15 个乱码名；对照主用户 0 是 486 个正常目录 / 96 项 media。所以卡点从来不是 IO，是 <code>keymaster.begin()</code> 对 auth-bound key 返回 <code>-26</code>。</p>
+
+<h4>18.22.3 一次编译、运行期穷举（<code>patches/system_vold/0007</code>）</h4>
+<p>把 0007 的 tied-profile helper 改成<strong>位掩码策略表</strong>：对 69 字节 <code>hw_auth_token_t</code> 穷举 4 个独立维度（<code>be64</code> / <code>be32</code> / <code>ts_alt</code> / <code>u_alt</code>，16 种组合）外加「<code>begin()</code> 不带 token」，共 17 条策略。每条打印字段名与 <code>begin</code> 错误码；<strong>第一条成功的策略直接继续 <code>update/finish</code> 解出 80 字符随机密码并完成 999 解密</strong>。所以一次 PIN 就能同时完成诊断与修复。</p>
+<p>后续任何策略复测只需 <code>adb shell 'echo N > /tmp/y52s_km_only'</code> + <code>twrp decrypt &lt;PIN&gt; 999</code>，<strong>不需要再编译</strong>（N 取 0..16，文件不存在则自动全跑）。</p>
+<p><strong>防回归断言</strong>（CI 与本地预演均 fail-fast）：上游 <code>unwrapSyntheticPasswordBlob()</code> 的 token 解析必须逐字保留 <code>memcpy(&amp;authToken.userId, p, 8); p += 8;</code>，且全文不得出现 <code>__builtin_bswap64</code>。run <code>42751657966</code> 已证明改动上游会让主用户 0 也 <code>-26</code>。本轮主用户 0 的代码路径一个字节都没动。</p>
+
+<h4>18.22.4 本地重打包：以后改 rc / 库不用编译</h4>
+<p>新增 <code>build/repack_ramdisk.py</code>：对已有 <code>recovery.img</code> 增删替换任意 ramdisk 条目，保留原 kernel/dtb/header（只更新 <code>ramdisk_size</code>）、逐字保留官方 vivo vbmeta（只重写 <code>footer.vbmeta_offset</code>），本地秒级产出可刷镜像。</p>
+<pre>python build/repack_ramdisk.py INPUT.img --set init.recovery.mt6853.rc=new.rc --out out.img
+python build/repack_ramdisk.py INPUT.img --list 'system/bin/keystore*'</pre>
+<p>往返测试：把已验证镜像的 rc 原样重新写入，输出 SHA256 = <code>a3855ed4…</code>，<strong>与输入字节级完全一致</strong>（815 条目、os_version、kernel、官方 vbmeta 全同）。因此补 <code>libkeystore_aidl.so</code> / vivo wifi keystore 库、改 rc trigger、调 props 都走本地，不再占云端编译。</p>
+
 <div class="foot">唯一入口：本文件。配置 <code>device/vivo/y52s/</code>，上游对照 <code>reference/</code>，
 证据 <code>device_dump/</code>，命令刷 <code>flash/</code>，TWRP 11 补丁 <code>patches/twrp11/</code>（存档），
 12.1 解密补丁 <code>patches/system_vold/</code>，CI 流水线 <code>build/{prepare_ci12_tree.py,apply_ci12_patches.sh,postprocess_ci12.py}</code>。未列出来源的参数保持 PENDING。</div>

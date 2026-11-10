@@ -101,3 +101,7 @@ build/ci12v5/*.img
 build/ci12v6/*.img
 !build/ci12v6/recovery.img.sha256
 !flash/probe_regression.sh
+!build/repack_ramdisk.py
+!flash/probe_keystore_auth.sh
+!flash/probe_twrp_readability.sh
+!flash/probe_999_data_paths.sh

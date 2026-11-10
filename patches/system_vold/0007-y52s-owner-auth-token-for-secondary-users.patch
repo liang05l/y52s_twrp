@@ -1,6 +1,6 @@
 --- a/Decrypt.cpp
 +++ b/Decrypt.cpp
-@@ -906,6 +906,159 @@
+@@ -906,6 +906,221 @@
      return 100000 + uid;
  }
  
@@ -82,85 +82,147 @@
 +		return "";
 +	}
 +
-+	android::hardware::keymaster::V4_0::HardwareAuthToken authToken;
 +	std::string tok;
 +	if (!android::base::ReadFileToString("/auth_token", &tok) || tok.size() < 69) {
 +		printf("y52s: no owner auth token for tied-profile key\n");
 +		return "";
 +	}
-+	{
-+		/* y52s: use EXACTLY the same parsing as unwrapSyntheticPasswordBlob()
-+		 * above. Measured on this device (2026-11-10, run 42751657966):
-+		 *   userId left as raw memcpy (0xbbc2828e49e6dbc8) -> user 0 begin error=0
-+		 *   userId byte-swapped      (0xc8dbe6498e82c2bb) -> user 0 begin error=-26
-+		 * Trustonic's keymaster consumes these fields as raw bytes, so NO
-+		 * bswap64 here and NO bswap64 in the upstream parser. The v5 helper
-+		 * used a 7-term timestamp swap (one term missing) -> wrong timestamp
-+		 * -> auth-bound tied-profile key rejected with -26. Fix by copying the
-+		 * upstream 8-term swap verbatim. */
-+		const uint8_t* p = (const uint8_t*)tok.data();
-+		p += 1;                                   // version
-+		memcpy(&authToken.challenge, p, 8); p += 8;
-+		memcpy(&authToken.userId, p, 8); p += 8;
-+		memcpy(&authToken.authenticatorId, p, 8); p += 8;
-+		uint32_t authType;
-+		memcpy(&authType, p, 4); p += 4;
-+		authType = ntohl(authType);
-+		authToken.authenticatorType = static_cast<
-+			android::hardware::keymaster::V4_0::HardwareAuthenticatorType>(authType);
-+		uint64_t timestamp;
-+		memcpy(&timestamp, p, 8); p += 8;
-+		timestamp = ((timestamp & 0x00000000000000FFULL) << 56) |
-+		            ((timestamp & 0x000000000000FF00ULL) << 40) |
-+		            ((timestamp & 0x0000000000FF0000ULL) << 24) |
-+		            ((timestamp & 0x00000000FF000000ULL) << 8) |
-+		            ((timestamp & 0x000000FF00000000ULL) >> 8) |
-+		            ((timestamp & 0x0000FF0000000000ULL) >> 24) |
-+		            ((timestamp & 0x00FF000000000000ULL) >> 40) |
-+		            ((timestamp & 0xFF00000000000000ULL) >> 56);
-+		authToken.timestamp = timestamp;
-+		authToken.mac.resize(32);
-+		memcpy(authToken.mac.data(), p, 32);
-+		printf("y52s: tied auth token aligned with upstream: userId=0x%llx type=%u ts=%llu\n",
-+			(unsigned long long)authToken.userId,
-+			(unsigned int)authToken.authenticatorType,
-+			(unsigned long long)authToken.timestamp);
++	/* ======================================================================
++	 * y52s: ONE build, every remaining hypothesis.
++	 *
++	 * All material needed for the tied-profile credential is readable in TWRP
++	 * (measured). The only unknown is the exact byte interpretation of the
++	 * 69-byte hw_auth_token_t that Trustonic's keymaster expects for an
++	 * AUTH-BOUND key. Each previous round tested ONE interpretation per
++	 * 30-minute cloud build. This table exhausts 4 independent bits at
++	 * runtime (16 combinations) plus a no-token begin(), logs every error
++	 * code, and the FIRST strategy that succeeds continues straight to
++	 * update/finish -- so one PIN entry both diagnoses AND fixes user 999.
++	 *
++	 *   bit0 be64     : byte-swap challenge / authenticatorId
++	 *   bit1 be32     : byte-swap authenticatorType (== ntohl)
++	 *   bit2 ts_alt   : invert the timestamp byte-swap choice
++	 *   bit3 u_alt    : invert the userId byte-swap choice
++	 *   strategy 16   : begin() WITHOUT any auth token
++	 *
++	 * /tmp/y52s_km_only with a number 0..16 restricts the run to one
++	 * strategy: further experiments need only `adb shell echo N >
++	 * /tmp/y52s_km_only` + `twrp decrypt <PIN> 999`, NOT another build.
++	 *
++	 * REGRESSION GUARD: the upstream unwrapSyntheticPasswordBlob() parser
++	 * above is deliberately untouched. run 42751657966 proved that changing
++	 * it makes user 0 fail with -26 too.
++	 * ====================================================================== */
++	typedef android::hardware::keymaster::V4_0::HardwareAuthToken HAT;
++	typedef android::hardware::keymaster::V4_0::HardwareAuthenticatorType HAType;
++
++	auto swap64 = [](uint64_t v) -> uint64_t {
++		return ((v & 0x00000000000000FFULL) << 56) |
++		       ((v & 0x000000000000FF00ULL) << 40) |
++		       ((v & 0x0000000000FF0000ULL) << 24) |
++		       ((v & 0x00000000FF000000ULL) << 8)  |
++		       ((v & 0x000000FF00000000ULL) >> 8)  |
++		       ((v & 0x0000FF0000000000ULL) >> 24) |
++		       ((v & 0x00FF000000000000ULL) >> 40) |
++		       ((v & 0xFF00000000000000ULL) >> 56);
++	};
++	auto swap32 = [](uint32_t v) -> uint32_t {
++		return ((v & 0x000000FFU) << 24) | ((v & 0x0000FF00U) << 8) |
++		       ((v & 0x00FF0000U) >> 8) | ((v & 0xFF000000U) >> 24);
++	};
++	auto sw64 = [&](uint64_t v, bool do_swap) -> uint64_t {
++		return do_swap ? swap64(v) : v;
++	};
++
++	const uint8_t* p = (const uint8_t*)tok.data();
++	uint64_t c_raw, u_raw, a_raw, ts_raw;
++	uint32_t ty_raw;
++	memcpy(&c_raw,  p + 1,  8);
++	memcpy(&u_raw,  p + 9,  8);
++	memcpy(&a_raw,  p + 17, 8);
++	memcpy(&ty_raw, p + 25, 4);
++	memcpy(&ts_raw, p + 29, 8);
++	printf("y52s: raw token fields c=0x%llx u=0x%llx a=0x%llx ty=0x%x ts=0x%llx\n",
++		(unsigned long long)c_raw, (unsigned long long)u_raw,
++		(unsigned long long)a_raw, (unsigned int)ty_raw,
++		(unsigned long long)ts_raw);
++
++	int only = -1;
++	std::string only_str;
++	if (android::base::ReadFileToString("/tmp/y52s_km_only", &only_str)) {
++		int val = 0; bool got = false;
++		for (char ch : only_str) {
++			if (ch >= '0' && ch <= '9') { val = val * 10 + (ch - '0'); got = true; }
++			else if (got) break;
++		}
++		if (got && val <= 16) { only = val; printf("y52s: strategy override: only %d\n", only); }
 +	}
 +
 +	std::vector<uint8_t> nonce_vec(nonce.begin(), nonce.end());
-+	auto params = AuthorizationSetBuilder()
-+		.Authorization(TAG_PURPOSE, KeyPurpose::DECRYPT)
-+		.Authorization(TAG_ALGORITHM, Algorithm::AES)
-+		.Authorization(TAG_BLOCK_MODE, BlockMode::GCM)
-+		.Authorization(TAG_PADDING, PaddingMode::NONE)
-+		.Authorization(TAG_NONCE, nonce_vec)
-+		.Authorization(TAG_MAC_LENGTH, 128);
-+	android::vold::km::AuthorizationSet outParams;
-+	KeymasterOperation op;
-+	op = keymaster.begin(km_blob, params, &outParams, authToken);
-+	if (!op) {
-+		printf("y52s: tied-profile keymaster begin failed: %d\n", (int)op.getErrorCode());
-+		return "";
++	for (int strategy = 0; strategy <= 16; ++strategy) {
++		if (only >= 0 && strategy != only) continue;
++		const bool be64   = (strategy & 1) != 0;
++		const bool be32   = (strategy & 2) != 0;
++		const bool ts_alt = (strategy & 4) != 0;
++		const bool u_alt  = (strategy & 8) != 0;
++		const bool no_token = (strategy == 16);
++
++		auto params = AuthorizationSetBuilder()
++			.Authorization(TAG_PURPOSE, KeyPurpose::DECRYPT)
++			.Authorization(TAG_ALGORITHM, Algorithm::AES)
++			.Authorization(TAG_BLOCK_MODE, BlockMode::GCM)
++			.Authorization(TAG_PADDING, PaddingMode::NONE)
++			.Authorization(TAG_NONCE, nonce_vec)
++			.Authorization(TAG_MAC_LENGTH, 128);
++		android::vold::km::AuthorizationSet outParams;
++		KeymasterOperation op;
++		if (no_token) {
++			printf("y52s: strategy 16: begin() WITHOUT auth token\n");
++			op = keymaster.begin(km_blob, params, &outParams);
++		} else {
++			HAT token;
++			token.challenge       = sw64(c_raw,  be64);
++			token.userId          = sw64(u_raw,  (bool)(be64 ^ u_alt));
++			token.authenticatorId = sw64(a_raw,  be64);
++			token.authenticatorType = static_cast<HAType>(be32 ? swap32(ty_raw) : ty_raw);
++			token.timestamp       = sw64(ts_raw, (bool)(be64 ^ ts_alt));
++			token.mac.resize(32);
++			memcpy(token.mac.data(), p + 37, 32);
++			printf("y52s: strategy %d [be64=%d be32=%d ts_alt=%d u_alt=%d] "
++			       "userId=0x%llx type=%u ts=%llu\n",
++				strategy, (int)be64, (int)be32, (int)ts_alt, (int)u_alt,
++				(unsigned long long)token.userId,
++				(unsigned int)token.authenticatorType,
++				(unsigned long long)token.timestamp);
++			op = keymaster.begin(km_blob, params, &outParams, token);
++		}
++		if (!op) {
++			printf("y52s: strategy %d begin failed: %d\n", strategy, (int)op.getErrorCode());
++			continue;
++		}
++		std::string plain, tail;
++		if (!op.updateCompletely(ciphertext, &plain)) {
++			printf("y52s: strategy %d update failed\n", strategy);
++			continue;
++		}
++		if (!op.finish(&tail)) {
++			printf("y52s: strategy %d finish failed\n", strategy);
++			continue;
++		}
++		plain += tail;
++		printf("y52s: STRATEGY %d SUCCEEDED, credential recovered (%zu bytes)\n",
++			strategy, plain.size());
++		return plain;
 +	}
-+	std::string plain, tail;
-+	if (!op.updateCompletely(ciphertext, &plain)) {
-+		printf("y52s: tied-profile keymaster update failed\n");
-+		return "";
-+	}
-+	if (!op.finish(&tail)) {
-+		printf("y52s: tied-profile keymaster finish failed\n");
-+		return "";
-+	}
-+	plain += tail;
-+	printf("y52s: tied-profile credential recovered (%zu bytes)\n", plain.size());
-+	return plain;
++	printf("y52s: all strategies exhausted for tied-profile credential\n");
++	return "";
 +}
 +
 +
  bool Is_Weaver(const std::string& spblob_path, const std::string& handle_str) {
  	printf("Is_Weaver\n");
  	std::string weaver_file = spblob_path + handle_str + ".weaver";
-@@ -970,20 +1123,23 @@
+@@ -970,20 +1185,23 @@
  	// printf("Password: '%s'\n", Password.c_str());
  	// The password token is the password scrypted with the parameters from the password data file
  	unsigned char password_token[PASSWORD_TOKEN_SIZE];
@@ -198,7 +260,7 @@
  	}
  	// output_hex(&password_token[0], PASSWORD_TOKEN_SIZE);printf("\n");
  	if (Is_Weaver(spblob_path, handle_str)) {
-@@ -1053,7 +1209,8 @@
+@@ -1053,7 +1271,8 @@
  		}
  		memcpy((void*)&application_id[0], (void*)&password_token[0], PASSWORD_TOKEN_SIZE);
  		memcpy((void*)&application_id[PASSWORD_TOKEN_SIZE], secdiscardable, SHA512_DIGEST_LENGTH);
@@ -208,7 +270,7 @@
  			int ret = -1;
  			bool request_reenroll = false;
  			android::sp<android::hardware::gatekeeper::V1_0::IGatekeeper> gk_device;
-@@ -1109,14 +1266,27 @@
+@@ -1109,14 +1328,27 @@
  			free(gk_pwd_token);
  			if (!hwRet.isOk() || ret != 0) {
  				printf("gatekeeper verification failed (ret=%d)\n", ret);
@@ -238,7 +300,7 @@
  	secret = android::keystore::unwrapSyntheticPasswordBlob(spblob_path, handle_str, user_id, (const void*)&application_id[0], 
  		PASSWORD_TOKEN_SIZE + SHA512_DIGEST_LENGTH, auth_token_len);
  	if (!secret.size()) {
-@@ -1189,6 +1359,17 @@
+@@ -1189,6 +1421,17 @@
  extern "C" bool Decrypt_User(const userid_t user_id, const std::string& Password) {
  	printf("[DEBUG] Decrypt_User: ENTER user_id=%d\n", user_id);
  	printf("Attempting to decrypt user\n");
