@@ -27,7 +27,7 @@ VD="$REPO/reference/y73s/patches/system_vold"
 P7="$REPO/patches/system_vold/0007-y52s-owner-auth-token-for-secondary-users.patch"
 P8="$REPO/patches/system_vold/0008-y52s-fresh-owner-auth-token.patch"
 P9="$REPO/patches/system_vold/0009-y52s-u999-credential-and-auth-dump.patch"
-P10="$REPO/patches/system_vold/0010-y52s-twrp-only-auth-token-registration.patch"
+P10="$REPO/patches/system_vold/0010-y52s-key-auth-params-and-runtime-override.patch"
 MTP="$REPO/patches/bootable_recovery_12.1/0001-y52s-mtp-default-off.patch"
 LINK="$REPO/patches/bootable_recovery_12.1/0002-y52s-keymaster-hidl-link.patch"
 
@@ -116,15 +116,22 @@ git apply "$P9" || fail "0009 apply failed"
 grep -q 'dump_auth_set' Decrypt.cpp \
   || fail "0009 missing: full KeyParameter dump for SID decoding"
 
-echo "  --- 0010 (TWRP-ONLY auth-token registration, Keymaster 3.0) ---"
+echo "  --- 0010 (key auth params + runtime override) ---"
 git apply --check "$P10" || fail "0010 does not apply"
 git apply "$P10" || fail "0010 apply failed"
-grep -q 'KM3 addAuthToken' Decrypt.cpp \
-  || fail "0010 missing: Keymaster 3.0 addAuthToken registration"
-grep -q 'android/hardware/keymaster/3.0/IKeymasterDevice.h' Decrypt.cpp \
-  || fail "0010 missing: Keymaster 3.0 HIDL header"
-grep -q 'TEE auth-token registration' Decrypt.cpp \
-  || fail "0010 missing: registration result logging"
+grep -q 'y52s:   tag=0x%08x val=' Decrypt.cpp \
+  || fail "0010 missing: key authorization value dump"
+grep -q '/tmp/y52s_sid_override' Decrypt.cpp \
+  || fail "0010 missing: runtime USER_SECURE_ID override"
+grep -q '/tmp/y52s_type_override' Decrypt.cpp \
+  || fail "0010 missing: runtime USER_AUTH_TYPE override"
+grep -q 'y52s: OVERRIDE userId' Decrypt.cpp \
+  || fail "0010 missing: override logging"
+# Keymaster 3.0/4.0 have no addAuthToken (only 2.0 did), so no such call may
+# exist: it would not compile.
+if grep -q 'addAuthToken(' Decrypt.cpp; then
+  fail "REGRESSION: addAuthToken does not exist on Keymaster 3.0/4.0"
+fi
 # The external credential hand-off was withdrawn per the TWRP-only constraint.
 if grep -q 'y52s: using supplied user-999 credential' Decrypt.cpp; then
   fail "REGRESSION: external credential path must not be in a TWRP-only build"

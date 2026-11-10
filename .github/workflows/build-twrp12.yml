@@ -225,12 +225,16 @@ jobs:
               '0008 Decrypt_User cache fallback missing from ramdisk'
           assert b'AUTH_TIMEOUT=30000' in d, \
               '0008 monotonic-clock diagnostic missing from ramdisk'
-          assert b'y52s:   tag=0x' in d, \
-              '0009 auth-set value dump missing from ramdisk'
-          assert b'y52s: KM3 addAuthToken rc=' in d, \
-              '0010 Keymaster 3.0 addAuthToken registration missing'
-          assert b'y52s: TEE auth-token registration' in d, \
-              '0010 registration result logging missing'
+          assert b'y52s:   tag=0x%08x val=' in d, \
+              '0010 key authorization value dump missing from ramdisk'
+          assert b'/tmp/y52s_sid_override' in d, \
+              '0010 runtime USER_SECURE_ID override missing from ramdisk'
+          assert b'/tmp/y52s_type_override' in d, \
+              '0010 runtime USER_AUTH_TYPE override missing from ramdisk'
+          assert b'y52s: OVERRIDE userId' in d, \
+              '0010 override logging missing from ramdisk'
+          assert b'addAuthToken(' not in d, \
+              'REGRESSION: addAuthToken does not exist on Keymaster 3.0/4.0'
           assert b'y52s: using supplied user-999 credential' not in d, \
               'REGRESSION: external credential hand-off must not be present'
           assert b'y52s_km_only' in d, \

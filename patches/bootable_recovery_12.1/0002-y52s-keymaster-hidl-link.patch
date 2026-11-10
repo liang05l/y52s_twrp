@@ -1,6 +1,6 @@
 --- a/Android.mk
 +++ b/Android.mk
-@@ -353,6 +353,15 @@
+@@ -353,6 +353,12 @@
          libkeystoreinfo.recovery \
          libgatekeeper_aidl
  
@@ -9,20 +9,16 @@
 +    # links the HIDL interface lib, so the recovery link fails with:
 +    #   undefined symbol: android::hardware::keymaster::V4_0::
 +    #                     IKeymasterDevice::getService(const std::string&, bool)
-+    # 0010 additionally uses Keymaster 3.0 addAuthToken() to register the
-+    # Gatekeeper-signed auth token with the TEE (4.0 removed that method).
 +    LOCAL_SHARED_LIBRARIES += android.hardware.keymaster@4.0
-+    LOCAL_SHARED_LIBRARIES += android.hardware.keymaster@3.0
      LOCAL_STATIC_LIBRARIES += libkeymint_support
  
      LOCAL_CFLAGS += -DTW_INCLUDE_FBE_METADATA_DECRYPT
-@@ -562,6 +571,10 @@
+@@ -562,6 +568,9 @@
      keystore2.rc \
      plat_keystore2_key_contexts
  
-+    # Install both HIDL keymaster client libs into the ramdisk.
++    # Install the Keymaster 4.0 HIDL client lib into the ramdisk.
 +    TWRP_REQUIRED_MODULES += android.hardware.keymaster@4.0
-+    TWRP_REQUIRED_MODULES += android.hardware.keymaster@3.0
 +
      ifneq ($(TW_INCLUDE_CRYPTO_FBE),)
      TWRP_REQUIRED_MODULES += \
