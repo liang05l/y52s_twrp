@@ -1478,6 +1478,19 @@ if (auth_token_len &gt; 0) {
 <h4>18.28.3 当前状态（所有运行时改动已还原）</h4>
 <p>本轮所有推库 / 换二进制 / 挂载都只发生在 tmpfs ramdisk，结束后已用 <code>build/repack_ramdisk.py</code> 的 cpio 解析器从 <code>ad1b22b0…</code> 镜像把 <code>system/bin/keystore</code>、<code>keystore_auth</code>、<code>keystore_cli_v2</code>、<code>libprotobuf-cpp-lite.so</code>、<code>android.system.wifi.keystore@1.0.so</code> 逐一还原为原始字节；额外推入的 7 个库、<code>/system/lib64/twrp11/</code>、<code>/auth_token</code>、<code>/auth_error</code>、临时挂载点全部删除；<code>ctl.stop keystore_auth</code> 已下发。<strong>分区与 BCB 从未改动</strong>。</p>
 <p>设备当前：U0=1（<code>/data/media/0</code> 96 个正常目录）、U999=0（7 个密文目录名）、<code>sys.usb.config=adb</code>、BCB 全 0、分区哈希 <code>ad1b22b0…</code>。回退 <code>build/recovery.img</code> = <code>a3855ed4…</code> 保留，全程未 format/wipe。</p>
+
+<h3>18.29 19:20 追加 — 按「只能用 TWRP 完成解密」落实的源码级修复（0010）</h3>
+<p>用户约束落地后，18.28.2b 的源码依据直接给出了修复点：<strong>不是补凭据，而是把被 0006 删掉的认证注册链补回 TWRP 自己的 <code>Decrypt.cpp</code></strong>。TWRP 11 在 <code>unwrapSyntheticPasswordBlob()</code> 里用 <code>property_set("ctl.start", "keystore_auth")</code> 把 Gatekeeper 刚签发的 69 字节 token 交给 keystore / TEE 认证表；0006 改成直连 Keymaster 4.0 HIDL <code>begin()</code> 后，4.0 又没有 <code>addAuthToken</code>（3.0 才有），认证表永远为空 → 任何 auth-bound key 的 <code>begin()</code> 都返回 <code>-26</code>。这解释了此前 17 策略、fresh-token hook、补库重建 <code>keystore</code> 服务全部失败。</p>
+<h4>18.29.1 <code>patches/system_vold/0010-y52s-twrp-only-auth-token-registration.patch</code></h4>
+<ul>
+  <li>在 <code>Get_Tied_Profile_Password()</code> 读到 <code>/auth_token</code> 之后、<code>begin()</code> 策略循环之前，<strong>由 TWRP 自己的 C++ 代码</strong>通过 <code>android.hardware.keymaster@3.0::IKeymasterDevice::addAuthToken()</code> 把原始 69 字节 token 注册进 TEE 认证表，并打印 <code>y52s: KM3 addAuthToken rc=…</code> 与 <code>y52s: TEE auth-token registration OK/FAILED</code>。</li>
+  <li>运行期开关 <code>/tmp/y52s_use_ksauth</code> 可同时触发 TWRP 11 原生的 <code>ctl.start keystore_auth</code>，两条链择一或并用，<strong>不需要再编译</strong>。</li>
+  <li><strong>删除 0009 的「外部凭据文件」快速路径</strong>：不存在任何从系统态搬运的凭据。解密全程由 TWRP 自己完成：注册 token → 解开 <code>gatekeeper.profile.key</code> 得到 999 的 LSKF → <code>Decrypt_User_Synth_Pass(999, P)</code> → Gatekeeper 验证 → 解 999 的 SP key → 装 CE key。workflow 增加反向断言，一旦外部凭据路径重新出现就 fail。</li>
+  <li>保留 0009 的 <code>KeyParameter</code> 完整字节 dump（可离线解出确切 <code>USER_SECURE_ID</code>）、0007 的 17 条策略表与运行时 <code>/tmp/y52s_km_only</code> 开关；上游解析器逐字未动，<code>__builtin_bswap64</code> 防回归断言保留。</li>
+</ul>
+<p><code>patches/bootable_recovery_12.1/0002</code> 同步加入 <code>android.hardware.keymaster@3.0</code> 的链接与 ramdisk 安装（该 .so 本来就在已验证 ramdisk 中，199192 B）；<code>apply_ci12_patches.sh</code> 与 workflow 断言同步。本地 <code>0006→0007→0008→0009→0010</code> 完整链 <code>git apply --check/apply</code> 全绿、括号配平、脚本语法与 YAML 均校验通过。</p>
+<p>提交 <code>d6cc074</code>（经 Git Data API 补推为远端 <code>9dfdf7fb</code>；git 传输层一直 502 但 API 可用），触发 run <code>42807006850</code>。产物离线校验 → TWRP 内 <code>push + dd</code> 刷入 → 清 BCB 重启 → <strong>用户只需在密码页输一次锁屏 PIN</strong>，即可由日志中的 <code>KM3 addAuthToken rc</code> 与 <code>User 999 Decrypted</code> 判定。回退 <code>a3855ed4…</code> 保留，全程未 format/wipe。</p>
+<p><strong>诚实边界</strong>：这是纯 TWRP 内、有源码依据、且能解释全部既往失败的修复，但 Trustonic 是否真的把 @3.0 实例注册出来、以及注册后 <code>begin()</code> 是否放行，仍以真机日志为准；日志已把这两点做成确定可读的标记，不再是猜测。</p>
 </div>
 
 <div class="foot">唯一入口：本文件。配置 <code>device/vivo/y52s/</code>，上游对照 <code>reference/</code>，
