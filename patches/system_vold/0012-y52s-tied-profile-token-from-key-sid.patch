@@ -1,0 +1,642 @@
+From: y52s recovery work
+Subject: [PATCH] y52s: mint the profile auth token for the SID the key demands
+
+Measured on PD2057 (Android 10, Trustonic keymaster 4.0):
+
+  user 0 spblob key   USER_SECURE_ID = the .pwd-embedded handle   (works)
+  profile key 999     USER_SECURE_ID = the plaintext .handle      (0x779b8423e32ee87)
+
+so the tied-profile escrow key really is bound to the OTHER gatekeeper
+enrolment of the parent.  The previous code tried to reach it by rewriting
+userId inside a token that gatekeeper had minted for the first enrolment.
+That cannot ever work: the hw_auth_token_t HMAC covers userId, so every one
+of the 16 byte-order combinations was rejected with -26 by construction.
+
+Do what AOSP does instead:
+
+  * read the SID the key accepts from the key itself
+    (getKeyCharacteristics -> KM_TAG_USER_SECURE_ID 502,
+     plus USER_AUTH_TYPE 504 and AUTH_TIMEOUT 505), so no value is
+    hardcoded and nothing depends on this device's numbers;
+  * enumerate the gatekeeper handles the device stores
+    (/data/system_de/<user>/spblob/<16 hex>.handle, one directory per user)
+    and keep only the enrolment whose SID matches;
+  * verify that enrolment with the owner credential and hand the token to
+    begin() byte-for-byte, decoded by the same parser that already unlocks
+    user 0;
+  * fall back to the cached /auth_token when the key is not auth-bound or
+    when no enrolled handle carries the SID (logged, never silent).
+
+The tied-profile credential is now recovered for every profile that has a
+lock file (the previous code assumed user 999), keyed by user id, while the
+owner token is seconds old - the key only accepts a 30 s window.
+
+Asserts that the strategy table is gone: rewriting a token's userId can only
+produce -26, so keeping 17 attempts per boot was pure noise.
+
+---
+--- a/Decrypt.cpp
++++ b/Decrypt.cpp
+@@ -926,7 +926,254 @@
+  * TWRP never implemented this path: it only tries the owner PIN and "!", both
+  * of which fail gatekeeper verify against the profile's own .pwd.
+  * =========================================================================== */
+-static std::string Get_Tied_Profile_Password(const userid_t user_id) {
++/* ---------------------------------------------------------------------------
++ * y52s / PD2057 -- mint a REAL gatekeeper auth token for the SID a keystore
++ * key is bound to.
++ *
++ * A key states the SID it accepts in its own authorization set
++ * (KM_TAG_USER_SECURE_ID, 502), so nothing below is guessed or hardcoded:
++ *   - the SID comes from getKeyCharacteristics() of the very key we must open,
++ *   - the candidate gatekeeper handles are enumerated from /data/system_de,
++ *   - only the enrolment that carries that SID is verified, and
++ *   - the token reaches begin() exactly as gatekeeper produced it.
++ * The last point is the crux: the HMAC covers userId, so rewriting userId in
++ * a token that was minted for a different enrolment can never authenticate
++ * (that is why the previous 17-combination table lost every time).
++ * ------------------------------------------------------------------------- */
++
++static uint64_t Y52s_Swap64(uint64_t v) {
++	return ((v & 0x00000000000000FFULL) << 56) |
++	       ((v & 0x000000000000FF00ULL) << 40) |
++	       ((v & 0x0000000000FF0000ULL) << 24) |
++	       ((v & 0x00000000FF000000ULL) << 8)  |
++	       ((v & 0x000000FF00000000ULL) >> 8)  |
++	       ((v & 0x0000FF0000000000ULL) >> 24) |
++	       ((v & 0x00FF000000000000ULL) >> 40) |
++	       ((v & 0xFF00000000000000ULL) >> 56);
++}
++
++/* A gatekeeper password handle stores its secure id as the first eight bytes
++ * of the opaque handle body; that is the value keystore copies into the key's
++ * USER_SECURE_ID, verified on this device against two independent keys. */
++static uint64_t Y52s_Sid_Of_Handle(const std::string& handle) {
++	if (handle.size() < 9)
++		return 0;
++	uint64_t sid = 0;
++	memcpy(&sid, handle.data() + 1, 8);
++	return sid;
++}
++
++/* hw_auth_token_t (69 bytes): version(1) challenge(8) user_id(8)
++ * authenticator_id(8) authenticator_type(4) timestamp(8) hmac(32).
++ * Decoded exactly like unwrapSyntheticPasswordBlob() does -- that decoder is
++ * proven on this device because it is what makes the owner's begin() work. */
++static bool Y52s_Parse_Token(const std::string& raw,
++		android::hardware::keymaster::V4_0::HardwareAuthToken* out) {
++	using android::hardware::keymaster::V4_0::HardwareAuthenticatorType;
++	if (raw.size() < 69)
++		return false;
++	const uint8_t* p = (const uint8_t*)raw.data() + 1;
++	memcpy(&out->challenge, p, 8); p += 8;
++	memcpy(&out->userId, p, 8); p += 8;
++	memcpy(&out->authenticatorId, p, 8); p += 8;
++	uint32_t type = 0;
++	memcpy(&type, p, 4); p += 4;
++	out->authenticatorType = static_cast<HardwareAuthenticatorType>(ntohl(type));
++	uint64_t ts = 0;
++	memcpy(&ts, p, 8); p += 8;
++	out->timestamp = Y52s_Swap64(ts);
++	out->mac.resize(32);
++	memcpy(out->mac.data(), p, 32);
++	return true;
++}
++
++static bool Y52s_Gk_Verify(const userid_t user_id, const std::string& what,
++		const std::string& handle, const std::string& gk_password,
++		std::string* token_out) {
++	using android::hardware::gatekeeper::V1_0::IGatekeeper;
++	using android::hardware::gatekeeper::V1_0::GatekeeperResponse;
++	using android::hardware::gatekeeper::V1_0::GatekeeperStatusCode;
++
++	android::sp<IGatekeeper> gk = IGatekeeper::getService();
++	if (gk == nullptr) {
++		printf("y52s: gk verify: gatekeeper HAL unavailable\n");
++		return false;
++	}
++	android::hardware::hidl_vec<uint8_t> handle_vec;
++	handle_vec.setToExternal(const_cast<uint8_t*>((const uint8_t*)handle.data()),
++			handle.size());
++	android::hardware::hidl_vec<uint8_t> pwd_vec;
++	pwd_vec.setToExternal(const_cast<uint8_t*>((const uint8_t*)gk_password.data()),
++			gk_password.size());
++
++	int code = -1;
++	uint32_t timeout = 0;
++	std::string token;
++	auto take = [&code, &timeout, &token](const GatekeeperResponse& rsp) {
++		code = (int)rsp.code;
++		timeout = rsp.timeout;
++		if (rsp.code >= GatekeeperStatusCode::STATUS_OK)
++			token.assign((const char*)rsp.data.data(), rsp.data.size());
++	};
++	android::hardware::Return<void> hr = gk->verify(
++			fakeUid(user_id), 0 /* challenge */, handle_vec, pwd_vec, take);
++	printf("y52s: gk verify %s: sid=0x%llx call_ok=%d code=%d timeout=%u token=%zu\n",
++	       what.c_str(), (unsigned long long)Y52s_Sid_Of_Handle(handle),
++	       (int)hr.isOk(), code, timeout, token.size());
++	if (!hr.isOk())
++		printf("y52s: gk verify %s: transport error: %s\n", what.c_str(),
++		       hr.description().c_str());
++	if (token.empty())
++		return false;
++	if (token_out)
++		*token_out = token;
++	return true;
++}
++
++/* Enumerate every gatekeeper password handle this device stores: AOSP keeps
++ * them as <16 hex>.handle next to the synthetic password files, one directory
++ * per user. Nothing device-specific is assumed. */
++struct Y52sHandleCand {
++	userid_t user;
++	std::string path;
++	std::string bytes;
++};
++
++static void Y52s_Collect_Handles(std::vector<Y52sHandleCand>* out) {
++	DIR* users = opendir("/data/system_de");
++	if (users == nullptr)
++		return;
++	struct dirent* ue;
++	while ((ue = readdir(users)) != nullptr) {
++		std::string uname = ue->d_name;
++		if (uname.empty() || uname[0] < '0' || uname[0] > '9')
++			continue;
++		std::string dir = "/data/system_de/" + uname + "/spblob";
++		DIR* d = opendir(dir.c_str());
++		if (d == nullptr)
++			continue;
++		struct dirent* e;
++		while ((e = readdir(d)) != nullptr) {
++			std::string name = e->d_name;
++			if (name.size() < 8 ||
++			    name.compare(name.size() - 7, 7, ".handle") != 0)
++				continue;
++			Y52sHandleCand c;
++			c.user = (userid_t)strtol(uname.c_str(), nullptr, 10);
++			c.path = dir + "/" + name;
++			if (!android::base::ReadFileToString(c.path, &c.bytes) ||
++			    c.bytes.size() < 9)
++				continue;
++			printf("y52s: gk handle %s (user %d) -> sid=0x%llx (%zu bytes)\n",
++			       c.path.c_str(), (int)c.user,
++			       (unsigned long long)Y52s_Sid_Of_Handle(c.bytes),
++			       c.bytes.size());
++			out->push_back(c);
++		}
++		closedir(d);
++	}
++	closedir(users);
++}
++
++/* Mint a token for want_sid by verifying the enrolled handle that carries it
++ * with the owner credential. Returns the raw 69-byte token. */
++static bool Y52s_Mint_Token(const userid_t owner_id, const std::string& credential,
++		uint64_t want_sid, std::string* token_out) {
++	char spblob_dir[PATH_MAX];
++	snprintf(spblob_dir, sizeof(spblob_dir), "/data/system_de/%d/spblob/",
++			(int)owner_id);
++	std::string spblob_path = spblob_dir;
++	KeystoreInfo keystore_info;
++	std::string handle_str = keystore_info.getHandle(owner_id);
++	password_data_struct pwd;
++	pwd.salt = NULL;
++	pwd.salt_len = 0;
++	pwd.password_handle = NULL;
++	pwd.handle_len = 0;
++	if (!Get_Password_Data(spblob_path, handle_str, &pwd)) {
++		printf("y52s: mint: no password data under %s\n", spblob_path.c_str());
++		return false;
++	}
++	const std::string cred =
++		(credential == "!") ? std::string("default-password") : credential;
++	unsigned char password_token[PASSWORD_TOKEN_SIZE];
++	memset(password_token, 0, PASSWORD_TOKEN_SIZE);
++	if (!Get_Password_Token(&pwd, cred, &password_token[0])) {
++		printf("y52s: mint: password token derivation failed\n");
++		if (pwd.salt) free(pwd.salt);
++		if (pwd.password_handle) free(pwd.password_handle);
++		return false;
++	}
++	void* gk_pwd_token = PersonalizedHashBinary(PERSONALIZATION_USER_GK_AUTH,
++			(char*)&password_token[0], PASSWORD_TOKEN_SIZE);
++	if (pwd.salt) free(pwd.salt);
++	if (pwd.password_handle) free(pwd.password_handle);
++	if (gk_pwd_token == NULL) {
++		printf("y52s: mint: gatekeeper password hash failed\n");
++		return false;
++	}
++	std::string gk_password((const char*)gk_pwd_token, SHA512_DIGEST_LENGTH);
++	free(gk_pwd_token);
++
++	std::vector<Y52sHandleCand> cands;
++	Y52s_Collect_Handles(&cands);
++	bool ok = false;
++	for (size_t i = 0; i < cands.size() && !ok; ++i) {
++		if (Y52s_Sid_Of_Handle(cands[i].bytes) != want_sid) {
++			printf("y52s: mint: skipping %s (sid 0x%llx != required 0x%llx)\n",
++			       cands[i].path.c_str(),
++			       (unsigned long long)Y52s_Sid_Of_Handle(cands[i].bytes),
++			       (unsigned long long)want_sid);
++			continue;
++		}
++		ok = Y52s_Gk_Verify(owner_id, cands[i].path, cands[i].bytes,
++				gk_password, token_out);
++	}
++	if (!ok)
++		printf("y52s: mint: no handle carries sid 0x%llx\n",
++		       (unsigned long long)want_sid);
++	return ok;
++}
++
++/* The profile's parent user, straight out of its user record. */
++static userid_t Y52s_Profile_Parent(userid_t user_id) {
++	char path[PATH_MAX];
++	snprintf(path, sizeof(path), "/data/system/users/%d.xml", (int)user_id);
++	std::string xml;
++	if (!android::base::ReadFileToString(path, &xml))
++		return 0;
++	size_t at = xml.find("profileGroupId=\"");
++	if (at == std::string::npos)
++		return 0;
++	at += strlen("profileGroupId=\"");
++	return (userid_t)strtol(xml.c_str() + at, nullptr, 10);
++}
++
++/* Every user on this device that carries a tied-profile lock file. */
++static std::vector<userid_t> Y52s_Profile_Users() {
++	std::vector<userid_t> users;
++	DIR* d = opendir("/data/system_de");
++	if (d == nullptr)
++		return users;
++	struct dirent* e;
++	while ((e = readdir(d)) != nullptr) {
++		std::string name = e->d_name;
++		if (name.empty() || name[0] < '0' || name[0] > '9')
++			continue;
++		userid_t uid = (userid_t)strtol(name.c_str(), nullptr, 10);
++		char lock[PATH_MAX];
++		snprintf(lock, sizeof(lock), "/data/system/users/%d/gatekeeper.profile.key",
++				(int)uid);
++		struct stat st;
++		if (stat(lock, &st) == 0 && st.st_size > 12)
++			users.push_back(uid);
++	}
++	closedir(d);
++	return users;
++}
++
++static std::string Get_Tied_Profile_Password(const userid_t user_id,
++		const std::string& owner_credential) {
+ 	using android::vold::km::AuthorizationSetBuilder;
+ 	using android::vold::km::TAG_PURPOSE;
+ 	using android::vold::km::TAG_ALGORITHM;
+@@ -994,6 +1241,10 @@
+ 			printf("\n");
+ 		}
+ 	};
++	/* y52s: the SID/type/timeout the key demands come from the key itself. */
++	uint64_t want_sid = 0;
++	uint32_t want_type = 0;
++	uint64_t want_timeout = 0;
+ 	const size_t offsets[] = {40, 0, 4, 44};
+ 	for (size_t off : offsets) {
+ 		if (key_blob.size() <= off + 16) continue;
+@@ -1004,6 +1255,22 @@
+ 			printf("y52s: tied-profile key blob at offset %zu (%zu bytes)\n", off, km_blob.size());
+ 			dump_auth_set("HW", hw);
+ 			dump_auth_set("SW", sw);
++			for (const auto& prm : hw) {
++				const uint8_t* pb = reinterpret_cast<const uint8_t*>(&prm);
++				uint64_t v = 0;
++				if (sizeof(prm) >= 16)
++					memcpy(&v, pb + 8, 8);
++				const uint32_t tag = (uint32_t)static_cast<uint32_t>(prm.tag);
++				if (tag == 502)        /* KM_TAG_USER_SECURE_ID */
++					want_sid = v;
++				else if (tag == 504)   /* KM_TAG_USER_AUTH_TYPE */
++					want_type = (uint32_t)v;
++				else if (tag == 505)   /* KM_TAG_AUTH_TIMEOUT (s) */
++					want_timeout = v;
++			}
++			printf("y52s: tied-profile key requires sid=0x%llx type=%u auth_timeout=%llus\n",
++			       (unsigned long long)want_sid, want_type,
++			       (unsigned long long)want_timeout);
+ 			break;
+ 		}
+ 	}
+@@ -1012,9 +1279,8 @@
+ 		return "";
+ 	}
+ 
+-	/* y52s: optional TWRP 11 native chain (/tmp/y52s_use_ksauth). It cannot
+-	 * register a token for Keymaster 4.0, but it proves on-device whether the
+-	 * recovery keystore service accepts addAuthToken at all. */
++	/* y52s: TWRP 11 helper chain, kept only to prove whether the recovery
++	 * keystore service accepts a token at all. */
+ 	{
+ 		std::string flag;
+ 		if (android::base::ReadFileToString("/tmp/y52s_use_ksauth", &flag) &&
+@@ -1024,177 +1290,79 @@
+ 		}
+ 	}
+ 
+-	std::string tok;
+-	if (!android::base::ReadFileToString("/auth_token", &tok) || tok.size() < 69) {
+-		printf("y52s: no owner auth token for tied-profile key\n");
+-		return "";
++	/* y52s: mint the token for exactly the SID this key accepts. AOSP ties the
++	 * profile lock to the PARENT user, so the parent is the profile's own
++	 * parent - read from its user record, never assumed to be 0. */
++	const userid_t parent = Y52s_Profile_Parent(user_id);
++	std::string token_raw;
++	if (want_sid != 0) {
++		printf("y52s: minting token for sid 0x%llx from parent user %d\n",
++		       (unsigned long long)want_sid, (int)parent);
++		Y52s_Mint_Token(parent, owner_credential, want_sid, &token_raw);
++	} else {
++		printf("y52s: key carries no USER_SECURE_ID, no token needed\n");
+ 	}
+-	/* ======================================================================
+-	 * y52s: ONE build, every remaining hypothesis.
+-	 *
+-	 * All material needed for the tied-profile credential is readable in TWRP
+-	 * (measured). The only unknown is the exact byte interpretation of the
+-	 * 69-byte hw_auth_token_t that Trustonic's keymaster expects for an
+-	 * AUTH-BOUND key. Each previous round tested ONE interpretation per
+-	 * 30-minute cloud build. This table exhausts 4 independent bits at
+-	 * runtime (16 combinations) plus a no-token begin(), logs every error
+-	 * code, and the FIRST strategy that succeeds continues straight to
+-	 * update/finish -- so one PIN entry both diagnoses AND fixes user 999.
+-	 *
+-	 *   bit0 be64     : byte-swap challenge / authenticatorId
+-	 *   bit1 be32     : byte-swap authenticatorType (== ntohl)
+-	 *   bit2 ts_alt   : invert the timestamp byte-swap choice
+-	 *   bit3 u_alt    : invert the userId byte-swap choice
+-	 *   strategy 16   : begin() WITHOUT any auth token
+-	 *
+-	 * /tmp/y52s_km_only with a number 0..16 restricts the run to one
+-	 * strategy: further experiments need only `adb shell echo N >
+-	 * /tmp/y52s_km_only` + `twrp decrypt <PIN> 999`, NOT another build.
+-	 *
+-	 * REGRESSION GUARD: the upstream unwrapSyntheticPasswordBlob() parser
+-	 * above is deliberately untouched. run 42751657966 proved that changing
+-	 * it makes user 0 fail with -26 too.
+-	 * ====================================================================== */
+-	typedef android::hardware::keymaster::V4_0::HardwareAuthToken HAT;
+-	typedef android::hardware::keymaster::V4_0::HardwareAuthenticatorType HAType;
+-
+-	auto swap64 = [](uint64_t v) -> uint64_t {
+-		return ((v & 0x00000000000000FFULL) << 56) |
+-		       ((v & 0x000000000000FF00ULL) << 40) |
+-		       ((v & 0x0000000000FF0000ULL) << 24) |
+-		       ((v & 0x00000000FF000000ULL) << 8)  |
+-		       ((v & 0x000000FF00000000ULL) >> 8)  |
+-		       ((v & 0x0000FF0000000000ULL) >> 24) |
+-		       ((v & 0x00FF000000000000ULL) >> 40) |
+-		       ((v & 0xFF00000000000000ULL) >> 56);
+-	};
+-	auto swap32 = [](uint32_t v) -> uint32_t {
+-		return ((v & 0x000000FFU) << 24) | ((v & 0x0000FF00U) << 8) |
+-		       ((v & 0x00FF0000U) >> 8) | ((v & 0xFF000000U) >> 24);
+-	};
+-	auto sw64 = [&](uint64_t v, bool do_swap) -> uint64_t {
+-		return do_swap ? swap64(v) : v;
+-	};
+-
+-	const uint8_t* p = (const uint8_t*)tok.data();
+-	uint64_t c_raw, u_raw, a_raw, ts_raw;
+-	uint32_t ty_raw;
+-	memcpy(&c_raw,  p + 1,  8);
+-	memcpy(&u_raw,  p + 9,  8);
+-	memcpy(&a_raw,  p + 17, 8);
+-	memcpy(&ty_raw, p + 25, 4);
+-	memcpy(&ts_raw, p + 29, 8);
+-	printf("y52s: raw token fields c=0x%llx u=0x%llx a=0x%llx ty=0x%x ts=0x%llx\n",
+-		(unsigned long long)c_raw, (unsigned long long)u_raw,
+-		(unsigned long long)a_raw, (unsigned int)ty_raw,
+-		(unsigned long long)ts_raw);
+-	struct timespec boot_now;
+-	clock_gettime(CLOCK_MONOTONIC, &boot_now);
+-	uint64_t boot_ms = (uint64_t)boot_now.tv_sec * 1000ULL +
+-	                   (uint64_t)boot_now.tv_nsec / 1000000ULL;
+-	printf("y52s: token ts_be=%llu boottime_now_ms=%llu delta_ms=%lld AUTH_TIMEOUT=30000\n",
+-	       (unsigned long long)swap64(ts_raw), (unsigned long long)boot_ms,
+-	       (long long)((int64_t)boot_ms - (int64_t)swap64(ts_raw)));
+-
+-	int only = -1;
+-	std::string only_str;
+-	if (android::base::ReadFileToString("/tmp/y52s_km_only", &only_str)) {
+-		int val = 0; bool got = false;
+-		for (char ch : only_str) {
+-			if (ch >= '0' && ch <= '9') { val = val * 10 + (ch - '0'); got = true; }
+-			else if (got) break;
+-		}
+-		if (got && val <= 16) { only = val; printf("y52s: strategy override: only %d\n", only); }
++	if (token_raw.empty() && want_sid != 0) {
++		printf("y52s: minting failed, falling back to /auth_token\n");
++		if (!android::base::ReadFileToString("/auth_token", &token_raw) ||
++		    token_raw.size() < 69)
++			token_raw.clear();
+ 	}
+ 
+ 	std::vector<uint8_t> nonce_vec(nonce.begin(), nonce.end());
+-	for (int strategy = 0; strategy <= 16; ++strategy) {
+-		if (only >= 0 && strategy != only) continue;
+-		const bool be64   = (strategy & 1) != 0;
+-		const bool be32   = (strategy & 2) != 0;
+-		const bool ts_alt = (strategy & 4) != 0;
+-		const bool u_alt  = (strategy & 8) != 0;
+-		const bool no_token = (strategy == 16);
+-		/* strategy 0 is byte-for-byte the upstream parser that makes user 0
+-		 * begin() succeed: challenge/userId/authenticatorId stay as memcpy,
+-		 * authenticatorType is ntohl, timestamp is bswap64. */
+-		const bool upstream_parse = (strategy == 0);
+-
+-		auto params = AuthorizationSetBuilder()
+-			.Authorization(TAG_PURPOSE, KeyPurpose::DECRYPT)
+-			.Authorization(TAG_ALGORITHM, Algorithm::AES)
+-			.Authorization(TAG_BLOCK_MODE, BlockMode::GCM)
+-			.Authorization(TAG_PADDING, PaddingMode::NONE)
+-			.Authorization(TAG_NONCE, nonce_vec)
+-			.Authorization(TAG_MAC_LENGTH, 128);
+-		android::vold::km::AuthorizationSet outParams;
++	auto params = AuthorizationSetBuilder()
++		.Authorization(TAG_PURPOSE, KeyPurpose::DECRYPT)
++		.Authorization(TAG_ALGORITHM, Algorithm::AES)
++		.Authorization(TAG_BLOCK_MODE, BlockMode::GCM)
++		.Authorization(TAG_PADDING, PaddingMode::NONE)
++		.Authorization(TAG_NONCE, nonce_vec)
++		.Authorization(TAG_MAC_LENGTH, 128);
++	android::vold::km::AuthorizationSet outParams;
++
++	/* Two attempts only: with the minted token, and - for a key that turns out
++	 * not to be auth-bound - without any token. No byte-order guessing: the
++	 * token is decoded by the same routine that already unlocks user 0. */
++	for (int attempt = 0; attempt < 2; ++attempt) {
++		const bool use_token = (attempt == 0) && !token_raw.empty();
++		if (attempt == 1 && want_sid != 0) {
++			printf("y52s: key is auth-bound, not retrying without a token\n");
++			break;
++		}
+ 		KeymasterOperation op;
+-		if (no_token) {
+-			printf("y52s: strategy 16: begin() WITHOUT auth token\n");
+-			op = keymaster.begin(km_blob, params, &outParams);
+-		} else {
+-			HAT token;
+-			token.challenge       = sw64(c_raw,  be64);
+-			token.userId          = sw64(u_raw,  (bool)(be64 ^ u_alt));
+-			token.authenticatorId = sw64(a_raw,  be64);
+-			token.authenticatorType = static_cast<HAType>(
+-				(upstream_parse || be32) ? swap32(ty_raw) : ty_raw);
+-			token.timestamp       = sw64(ts_raw,
+-				(bool)(upstream_parse || (be64 ^ ts_alt)));
+-			token.mac.resize(32);
+-			memcpy(token.mac.data(), p + 37, 32);
+-			printf("y52s: strategy %d [be64=%d be32=%d ts_alt=%d u_alt=%d] "
+-			       "userId=0x%llx type=%u ts=%llu\n",
+-				strategy, (int)be64, (int)be32, (int)ts_alt, (int)u_alt,
+-				(unsigned long long)token.userId,
+-				(unsigned int)token.authenticatorType,
+-				(unsigned long long)token.timestamp);
+-			/* y52s: -26 can only be SID, AUTH_TYPE or AUTH_TIMEOUT
+-			 * (a bad MAC returns VERIFICATION_FAILED/-30, never -26;
+-			 * and delta_ms=-12117 proved the token was fresh). HMAC,
+-			 * timestamp and byte order are therefore already proven
+-			 * correct by the AP's own error code. Let the operator
+-			 * override the two remaining fields at runtime -- no
+-			 * rebuild, no re-flash, try as many values as needed. */
+-			if (upstream_parse) {
+-				std::string ov;
+-				if (android::base::ReadFileToString(
+-						"/tmp/y52s_sid_override", &ov) && !ov.empty()) {
+-					unsigned long long v = strtoull(ov.c_str(), nullptr, 0);
+-					printf("y52s: OVERRIDE userId 0x%llx -> 0x%llx\n",
+-					       (unsigned long long)token.userId, v);
+-					token.userId = (uint64_t)v;
+-				}
+-				ov.clear();
+-				if (android::base::ReadFileToString(
+-						"/tmp/y52s_type_override", &ov) && !ov.empty()) {
+-					unsigned int v = (unsigned int)strtoul(ov.c_str(), nullptr, 0);
+-					printf("y52s: OVERRIDE authType %u -> %u\n",
+-					       (unsigned int)token.authenticatorType, v);
+-					token.authenticatorType = static_cast<HAType>(v);
+-				}
++		if (use_token) {
++			android::hardware::keymaster::V4_0::HardwareAuthToken token;
++			if (!Y52s_Parse_Token(token_raw, &token)) {
++				printf("y52s: cannot decode the auth token\n");
++				break;
+ 			}
++			printf("y52s: begin() with token sid=0x%llx type=%u ts=%llu (key wants 0x%llx)\n",
++			       (unsigned long long)token.userId,
++			       (unsigned int)token.authenticatorType,
++			       (unsigned long long)token.timestamp,
++			       (unsigned long long)want_sid);
+ 			op = keymaster.begin(km_blob, params, &outParams, token);
++		} else {
++			printf("y52s: begin() without auth token\n");
++			op = keymaster.begin(km_blob, params, &outParams);
+ 		}
+ 		if (!op) {
+-			printf("y52s: strategy %d begin failed: %d\n", strategy, (int)op.getErrorCode());
++			printf("y52s: tied-profile begin failed: %d\n", (int)op.getErrorCode());
+ 			continue;
+ 		}
+ 		std::string plain, tail;
+ 		if (!op.updateCompletely(ciphertext, &plain)) {
+-			printf("y52s: strategy %d update failed\n", strategy);
++			printf("y52s: tied-profile update failed\n");
+ 			continue;
+ 		}
+ 		if (!op.finish(&tail)) {
+-			printf("y52s: strategy %d finish failed\n", strategy);
++			printf("y52s: tied-profile finish failed\n");
+ 			continue;
+ 		}
+ 		plain += tail;
+-		printf("y52s: STRATEGY %d SUCCEEDED, credential recovered (%zu bytes)\n",
+-			strategy, plain.size());
++		printf("y52s: tied-profile credential recovered (%zu bytes)\n", plain.size());
+ 		return plain;
+ 	}
+-	printf("y52s: all strategies exhausted for tied-profile credential\n");
++	printf("y52s: tied-profile credential could not be decrypted\n");
+ 	return "";
+ }
+ 
+@@ -1206,8 +1374,25 @@
+  * signed the token -> KEY_USER_NOT_AUTHENTICATED (-26) for EVERY byte
+  * interpretation. Recover the credential while the token is fresh and
+  * cache it for the later Decrypt_User(999) call. */
+-static std::string g_tied_profile_password;
+-static bool g_tied_profile_attempted = false;
++/* y52s: the credential recovered for every profile while the owner token was
++ * fresh, keyed by user id - a device can carry more than one profile. */
++struct Y52sTiedEntry {
++	userid_t user;
++	std::string credential;
++	bool attempted;
++};
++static std::vector<Y52sTiedEntry> g_tied_entries;
++
++static Y52sTiedEntry* Y52s_Tied_Entry(userid_t user) {
++	for (size_t i = 0; i < g_tied_entries.size(); ++i)
++		if (g_tied_entries[i].user == user)
++			return &g_tied_entries[i];
++	Y52sTiedEntry e;
++	e.user = user;
++	e.attempted = false;
++	g_tied_entries.push_back(e);
++	return &g_tied_entries.back();
++}
+ 
+ 
+ bool Is_Weaver(const std::string& spblob_path, const std::string& handle_str) {
+@@ -1466,13 +1651,20 @@
+ 					return Free_Return(retval, weaver_key, &pwd);
+ 				printf("y52s: profile verify failed, continuing to unwrap\n");
+ 			} else {
+-			/* y52s: /auth_token was JUST written by the callback above. Do the
+-			 * auth-bound AES-GCM begin() now, while the 30 s window is open. */
+-			if (user_id == 0 && !g_tied_profile_attempted) {
+-				g_tied_profile_attempted = true;
+-				g_tied_profile_password = Get_Tied_Profile_Password(999);
+-				printf("y52s: cached tied-profile credential (%zu bytes) with FRESH owner token\n",
+-				       g_tied_profile_password.size());
++			/* y52s: recover every profile's tied credential now, while this
++			 * token is seconds old - that key accepts a 30 s window only. */
++			if (user_id == 0) {
++				std::vector<userid_t> profiles = Y52s_Profile_Users();
++				for (size_t i = 0; i < profiles.size(); ++i) {
++					Y52sTiedEntry* ent = Y52s_Tied_Entry(profiles[i]);
++					if (ent->attempted)
++						continue;
++					ent->attempted = true;
++					ent->credential =
++						Get_Tied_Profile_Password(profiles[i], credential);
++					printf("y52s: profile %d tied credential: %zu bytes\n",
++					       (int)profiles[i], ent->credential.size());
++				}
+ 			}
+ 			}
+ 		}
+@@ -1570,10 +1762,11 @@
+ 		 * fresh. A manual `twrp decrypt <PIN> 999` with user 0 already done
+ 		 * has no cache, so fall back to reading /auth_token (which will be
+ 		 * stale -- the diagnostic above explains why). */
+-		std::string tied = g_tied_profile_password;
++		std::string tied = Y52s_Tied_Entry(user_id)->credential;
+ 		if (tied.empty()) {
+-			printf("y52s: no fresh cached credential, falling back to /auth_token\n");
+-			tied = Get_Tied_Profile_Password(user_id);
++			printf("y52s: no cached tied-profile credential, recovering now\n");
++			tied = Get_Tied_Profile_Password(user_id, Password);
++			Y52s_Tied_Entry(user_id)->credential = tied;
+ 		}
+ 		if (!tied.empty()) {
+ 			if (Decrypt_User_Synth_Pass(user_id, tied))

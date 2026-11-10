@@ -29,6 +29,7 @@ P8="$REPO/patches/system_vold/0008-y52s-fresh-owner-auth-token.patch"
 P9="$REPO/patches/system_vold/0009-y52s-u999-credential-and-auth-dump.patch"
 P10="$REPO/patches/system_vold/0010-y52s-key-auth-params-and-runtime-override.patch"
 P11="$REPO/patches/system_vold/0011-y52s-plaintext-gatekeeper-handle.patch"
+P12="$REPO/patches/system_vold/0012-y52s-tied-profile-token-from-key-sid.patch"
 MTP="$REPO/patches/bootable_recovery_12.1/0001-y52s-mtp-default-off.patch"
 LINK="$REPO/patches/bootable_recovery_12.1/0002-y52s-keymaster-hidl-link.patch"
 
@@ -158,6 +159,30 @@ grep -q '0000000000000000.handle' Decrypt.cpp \
 grep -q 'pwd-embedded handle' Decrypt.cpp \
   || fail "0011 missing: .pwd handle fallback (single-enrolment devices)"
 echo "  0011 OK (multi-enrolment gatekeeper handle, with fallback)"
+
+echo "  --- 0012 (token minted for the SID the profile key demands) ---"
+patch -p1 --dry-run -N < "$P12" >/dev/null || fail "0012 does not apply"
+patch -p1 -N -s < "$P12" || fail "0012 apply failed"
+grep -q 'Y52s_Mint_Token' Decrypt.cpp \
+  || fail "0012 missing: token minted for the key's own SID"
+grep -q 'y52s: gk verify %s: sid=0x%llx call_ok=%d' Decrypt.cpp \
+  || fail "0012 missing: gatekeeper verify diagnostics"
+grep -q 'tied-profile key requires sid=' Decrypt.cpp \
+  || fail "0012 missing: required SID read from getKeyCharacteristics"
+grep -q 'Y52s_Collect_Handles' Decrypt.cpp \
+  || fail "0012 missing: handle enumeration instead of one hardcoded path"
+grep -q 'Y52s_Profile_Parent' Decrypt.cpp \
+  || fail "0012 missing: parent read from the user record"
+# The 16-combination table could never work: the token HMAC covers userId.
+if grep -q 'strategy <= 16' Decrypt.cpp; then
+  fail "REGRESSION: userId-rewriting strategy table is back"
+fi
+if grep -q '/tmp/y52s_sid_override' Decrypt.cpp; then
+  fail "REGRESSION: runtime SID override is back (non-generic)"
+fi
+grep -q 'memcpy(&authToken.userId, p, 8); p += 8;' Decrypt.cpp \
+  || fail "REGRESSION: upstream auth token parser was modified"
+echo "  0012 OK (SID-driven token, no userId rewriting, no hardcoded ids)"
 
 echo "=== bootable/recovery (MTP default off) ==="
 cd "$WORK/bootable/recovery"
