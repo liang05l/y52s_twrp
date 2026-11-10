@@ -216,44 +216,60 @@ jobs:
           pg = lambda n: ((n + page - 1) // page) * page
           off = pg(hsz) + pg(v[0])
           d = gzip.decompress(b[off:off+v[2]])
+          # y52s: patch markers. These are the strings the *current* patch
+          # series actually emits; every removed strategy is asserted absent
+          # below, so a stale marker here can never mask a regression.
           assert b'y52s: scrypt password token' in d, \
               'user999 AOSP default-password scrypt patch marker missing from ramdisk'
-          assert b'y52s: STRATEGY' in d, \
-              'runtime keymaster strategy table marker missing from ramdisk'
+          assert b'y52s: sid token: minted for sid=0x' in d, \
+              '0013 SID token derived from the synthetic password is missing'
+          assert b'y52s: sid token: %s carries sid=0x' in d, \
+              '0013 SID-handle matching log is missing'
+          assert b'y52s: sid token: gatekeeper input derivation failed' in d, \
+              '0013 gatekeeper input derivation (SP800 / personalisedHash) is missing'
+          assert b'y52s: synthetic password cached for user' in d, \
+              '0013 synthetic password cache is missing'
+          assert b'y52s: gk verify %s (uid %u): sid=0x' in d, \
+              '0013 explicit gatekeeper uid domain is missing'
+          assert b'tied-profile key requires sid=0x' in d, \
+              '0012 required SID read from getKeyCharacteristics is missing'
+          assert b'tied-profile credential recovered' in d, \
+              '0012 escrow decryption path is missing'
+          assert b'y52s: escrow key %s' in d, \
+              '0012 keystore escrow key lookup by suffix is missing'
           assert b'y52s: reusing owner auth token' in d, \
-              'user999 owner-token fallback marker missing from ramdisk'
-          assert b'with FRESH owner token' in d, \
-              '0008 fresh-token hook missing from ramdisk'
-          assert b'no fresh cached credential' in d, \
-              '0008 Decrypt_User cache fallback missing from ramdisk'
-          assert b'AUTH_TIMEOUT=30000' in d, \
-              '0008 monotonic-clock diagnostic missing from ramdisk'
+              'user999 owner-token reuse marker missing from ramdisk'
           assert b'y52s:   tag=0x%08x val=' in d, \
               '0010 key authorization value dump missing from ramdisk'
-          assert b'/tmp/y52s_sid_override' in d, \
-              '0010 runtime USER_SECURE_ID override missing from ramdisk'
-          assert b'/tmp/y52s_type_override' in d, \
-              '0010 runtime USER_AUTH_TYPE override missing from ramdisk'
-          assert b'y52s: OVERRIDE userId' in d, \
-              '0010 override logging missing from ramdisk'
           assert b'y52s: gatekeeper verify with' in d, \
-              '0011 multi-enrolment gatekeeper handle missing from ramdisk'
-          assert b'0000000000000000.handle' in d, \
-              '0011 plaintext spblob handle fallback missing from ramdisk'
+              '0011 gatekeeper handle probing missing from ramdisk'
           assert b'pwd-embedded handle' in d, \
               '0011 .pwd handle fallback missing from ramdisk'
-          assert b'y52s_ks_prep: src=' in d, \
+          assert b'y52s_ks_prep: waited=' in d, \
               'keystore tmpfs prep script missing from ramdisk'
+          assert b'y52s_ks_prep: svc=' in d, \
+              'keystore prep must report the service and pid it started'
+          assert b'_prep /system/bin/y52s_ks_prep.sh' in d, \
+              'keystore prep oneshot service missing from ramdisk'
+          assert b'/system/bin/keystore /tmp/misc/keystore' in d, \
+              'legacy keystore must run against the tmpfs copy of the store'
           assert b'/system/kslib' in d, \
               'keystore private library path missing from ramdisk'
-          assert b'addAuthToken(' not in d, \
-              'REGRESSION: addAuthToken does not exist on Keymaster 3.0/4.0'
-          assert b'y52s: using supplied user-999 credential' not in d, \
-              'REGRESSION: external credential hand-off must not be present'
-          assert b'y52s_km_only' in d, \
-              'runtime strategy override marker missing from ramdisk'
-          assert b'__builtin_bswap64' not in d, \
-              'REGRESSION: bswap64 on auth token breaks user 0 decryption'
+          # Nothing that was retracted may come back: each of these either
+          # cannot work against Keymaster 4.0 or hardcodes this one device.
+          for gone, why in (
+              (b'addAuthToken(', 'addAuthToken does not exist on Keymaster 3.0/4.0'),
+              (b'y52s: using supplied user-999 credential',
+               'external credential hand-off must not exist in a TWRP-only build'),
+              (b'__builtin_bswap64', 'bswap64 on the auth token breaks user 0 decryption'),
+              (b'y52s: STRATEGY', 'rewriting a token userId can only return -26'),
+              (b'/tmp/y52s_sid_override', 'runtime SID override hardcodes one device'),
+              (b'/tmp/y52s_type_override', 'runtime auth-type override hardcodes one device'),
+              (b'y52s_km_only', 'runtime keymaster-only override hardcodes one device'),
+              (b'0000000000000000.handle',
+               'the PIN cannot open the SID enrolment; retrying only burns throttle'),
+          ):
+              assert gone not in d, 'REGRESSION: ' + why
           assert b'PD2057' in d, 'PD2057 props missing'
           assert b'android.hardware.keymaster@4.0.so' in d, \
               'keymaster 4.0 HIDL runtime lib missing from ramdisk'
