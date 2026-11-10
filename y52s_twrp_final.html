@@ -1491,6 +1491,43 @@ if (auth_token_len &gt; 0) {
 <p><code>patches/bootable_recovery_12.1/0002</code> 同步加入 <code>android.hardware.keymaster@3.0</code> 的链接与 ramdisk 安装（该 .so 本来就在已验证 ramdisk 中，199192 B）；<code>apply_ci12_patches.sh</code> 与 workflow 断言同步。本地 <code>0006→0007→0008→0009→0010</code> 完整链 <code>git apply --check/apply</code> 全绿、括号配平、脚本语法与 YAML 均校验通过。</p>
 <p>提交 <code>d6cc074</code>（经 Git Data API 补推为远端 <code>9dfdf7fb</code>；git 传输层一直 502 但 API 可用），触发 run <code>42807006850</code>。产物离线校验 → TWRP 内 <code>push + dd</code> 刷入 → 清 BCB 重启 → <strong>用户只需在密码页输一次锁屏 PIN</strong>，即可由日志中的 <code>KM3 addAuthToken rc</code> 与 <code>User 999 Decrypted</code> 判定。回退 <code>a3855ed4…</code> 保留，全程未 format/wipe。</p>
 <p><strong>诚实边界</strong>：这是纯 TWRP 内、有源码依据、且能解释全部既往失败的修复，但 Trustonic 是否真的把 @3.0 实例注册出来、以及注册后 <code>begin()</code> 是否放行，仍以真机日志为准；日志已把这两点做成确定可读的标记，不再是猜测。</p>
+
+<h3>18.30 19:53 追加 — 18.29 的修复<strong>编译失败</strong>，并因此修正了一个结构性误判</h3>
+<p>run <code>42807006850</code> 的「Apply decryption patches」步骤 <strong>success</strong>，但「Build recoveryimage」<strong>failure</strong>，报错唯一一行：</p>
+<pre><code>system/vold/Decrypt.cpp:1037:19: error: no member named 'addAuthToken'
+in 'android::hardware::keymaster::V3_0::IKeymasterDevice'</code></pre>
+
+<h4>18.30.1 用 HAL 定义把这件事定死（不再靠记忆）</h4>
+<ul>
+  <li>拉取 <code>hardware/interfaces/keymaster/3.0/IKeymasterDevice.hal</code>：它写的是 <code>interface IKeymasterDevice {</code>，<strong>既不 <code>extends @2.0</code>，也没有 <code>addAuthToken</code></strong>（<code>grep -c addAuthToken</code> 为 0，全文 350 行）。</li>
+  <li>4.0 同样独立定义（<code>IKeymasterDevice.hal:199</code>），只 <code>import</code> 3.0 的 <code>ErrorCode</code>。</li>
+  <li>设备 VINTF 只声明 4.0（<code>/vendor/lib64/libkeymaster4.so</code>），ramdisk 里 <code>android.hardware.keymaster@3.0.so</code>(199192 B) 与 <code>@4.0.so</code>(158488 B) 都在，但 <strong><code>@2.0.so</code> 不存在</strong>。</li>
+  <li>只有 <strong>Keymaster 2.0</strong> 有 <code>addAuthToken</code>；3.0 和 4.0 都把它删掉了。</li>
+</ul>
+<p><strong>因此 18.28.1 / 18.29 的「把 token 注册进 TEE 认证表」在 Keymaster 4.0 上结构性地不存在</strong>。4.0 的模式是：<strong>每次 <code>begin()</code> 内联校验调用方传入的 <code>HardwareAuthToken</code></strong>。前面把「认证表为空」当作根因是错的，这一条现在被 HAL 源码否证。TWRP 11 的 <code>keystore_auth</code> 之所以能工作，是因为它走的是 <code>IKeystoreService::addAuthToken</code>（Android 10 keystore 用户态表），而 keystore 代客执行 key 操作时才会把 token 附上——这跟 TWRP 直连 HIDL 是两条完全不同的路，前者在 recovery 里被 SELinux 挡住（<code>result :6</code> / binder <code>EINVAL</code>，18.27 已实测）。</p>
+
+<h4>18.30.2 错误码把范围收窄到两个字段</h4>
+<pre><code>KEY_USER_NOT_AUTHENTICATED = -26   // 授权参数不满足
+VERIFICATION_FAILED        = -30   // MAC 校验失败</code></pre>
+<p>6 轮 × 17 策略 + fresh-token hook + 补库重建 keystore，<strong>全部返回 -26，从未出现 -30</strong>。配合 <code>delta_ms=-12117</code>（token 比 AP 单调时钟还新 12 秒，30 秒窗口绰绰有余），字节序与时效都已排除，剩下只有两个字段可能不对：<strong><code>USER_SECURE_ID</code>（tag 502）</strong>与 <strong><code>USER_AUTH_TYPE</code>（tag 504）</strong>。</p>
+<p>同时保留一个诚实的保留：若 Trustonic 的实现把 SID 检查放在 MAC 校验<em>之前</em>，那么 <code>-26</code> 也会遮住 MAC 问题，此时 <code>-30</code> 永远不会出现。所以本轮不把「HMAC 一定有效」当结论，而是直接把 key 的真实授权值打印出来对比。</p>
+
+<h4>18.30.3 新的 <code>0010-y52s-key-auth-params-and-runtime-override.patch</code></h4>
+<ul>
+  <li><strong>打印 key 的授权参数真实值</strong>：<code>dump_auth_set</code> 从「只打 tag」升级为「tag + value（十进制/十六进制）+ 原始字节」，覆盖 HW 与 SW 两个集合，<code>USER_SECURE_ID</code> / <code>USER_AUTH_TYPE</code> / <code>AUTH_TIMEOUT</code> 可直接读出，不再靠推断。</li>
+  <li><strong>运行期覆盖，一次刷机穷举到底</strong>：在已被证明可用的上游 strategy 0 上，读 <code>/tmp/y52s_sid_override</code> 与 <code>/tmp/y52s_type_override</code> 覆盖 <code>token.userId</code> / <code>token.authenticatorType</code>，并打印 <code>y52s: OVERRIDE userId 0x… -&gt; 0x…</code>。之后换值只需在 TWRP 里写文件 + 重跑 <code>twrp decrypt</code>，<strong>不再需要 30 分钟云端编译</strong>。</li>
+  <li>保留 <code>/tmp/y52s_use_ksauth</code> 触发 TWRP 11 原生 <code>ctl.start keystore_auth</code>，仅作为「recovery 内 keystore 到底接不接受 addAuthToken」的现场证据。</li>
+  <li>外部凭据路径<strong>保持删除</strong>（TWRP-only 约束）；<code>0002</code> 回退掉 <code>@3.0</code> 的链接与 ramdisk 安装。</li>
+  <li>CI 与 apply 脚本加了反向断言：<code>addAuthToken(</code> 一旦重新出现就直接 fail，避免再白跑一轮编译。</li>
+</ul>
+
+<h4>18.30.4 顺带查清的零成本事实（user 999 的实际形态）</h4>
+<ul>
+  <li><code>/data/system_de/999/spblob/</code> 有完整一套：<code>0000000000000000.handle</code>(58 B)、<code>.p1</code>(32 B)、<code>.e0</code>(60 B)、<code>c977db9a6356c1ad.spblob</code>(186 B)、<code>.pwd</code>(89 B)、<code>.secdis</code>(16384 B)。<strong>没有 <code>.weaver</code> 文件</strong>（全盘 <code>find -name "*.weaver"</code> 为空）→ 999 走 gatekeeper，不是 weaver。</li>
+  <li>999 有<strong>自己独立的</strong> <code>gatekeeper.password.handle</code> 体系与 <code>/data/system/users/999/gatekeeper.profile.key</code>(108 B)，说明它是 AOSP tied profile，LSKF 是独立的随机 80 字符，不与主用户共用。</li>
+  <li><code>Decrypt_User(999, Password)</code> 里本来就有「tied 失败后用调用方传入的 PIN 再试一次」的 fallback（<code>trying supplied password</code>），所以「vivo 分身与主用户同密码」这条假设<strong>已经在真机上跑过并失败</strong>，可以正式排除。</li>
+</ul>
+<p><strong>当前状态</strong>：修正提交 <code>0ea00c3</code>（经 API 补推为远端 <code>66921c63</code>），新 run <code>42812278979</code> 构建中。设备仍是 TWRP、分区 <code>ad1b22b0…</code>、U0=1、U999=0、BCB 全 0；回退 <code>a3855ed4…</code> 保留；全程未 format/wipe。</p>
 </div>
 
 <div class="foot">唯一入口：本文件。配置 <code>device/vivo/y52s/</code>，上游对照 <code>reference/</code>，
