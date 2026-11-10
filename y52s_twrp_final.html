@@ -1272,6 +1272,25 @@ failed to unwrapSyntheticPasswordBlob</pre>
 <p>刷入沿用 TWRP 内 <code>push + dd</code>（2.4 s + 0.7 s），<strong>分区回读 <code>b2372e75…</code> 一致</strong>，清 BCB 后 <code>reboot recovery</code>。重启后确认：运行中二进制能 grep 到 tied-profile 与 <code>gatekeeper.profile.key</code> 标记（各 1 次）、<code>installKeyLegacy: SUCCESS</code>、<code>Loading page decrypt_pin</code> 已出现、BCB 全 0、<code>sys.usb.config=adb</code>。</p>
 <div class="block"><strong>唯一剩下一步</strong>：在 TWRP 屏幕上输锁屏 PIN。主用户 0 解密时会把机主 token 写入 <code>/auth_token</code>；随后 TWRP 遍历用户 999，新版 <code>Decrypt_User()</code> 会先用该 token 解密 <code>gatekeeper.profile.key</code> 得到 80 字符随机密码（<code>y52s: tied-profile credential recovered</code>），再用它走 <code>Decrypt_User_Synth_Pass(999, tied)</code> —— gatekeeper verify 应返回 <code>Gatekeeper verification succeeded</code>，生成 999 自己的 auth token，SP unwrap 不再 <code>-26</code>。输完告诉我，我读 <code>twrp.user.999.decrypt</code> 与 <code>/data/user/999</code> 明文情况给出定论。回退 <code>a3855ed4…</code> 保留；全程未 format / wipe。</div>
 
+<h3>18.20 03:47 追加 — 决定性根因：<code>hw_auth_token_t</code> 字节序解析错误（有原始字节证据）</h3>
+<p>18.19 的 tied-profile 路径<strong>已经执行到 keymaster.begin</strong>，key blob 也正确定位（offset 40，208 B），但 <code>begin</code> 依旧返回 <code>-26</code>。真机日志：</p>
+<pre>y52s: tied-profile key blob at offset 40 (208 bytes)
+[Keymaster] begin (authToken): Purpose=1, keySize=208, paramsCount=6
+y52s: tied-profile keymaster begin failed: -26
+[SPBLOB] Parsed auth token: challenge=0, userId=13529519778211224520, authType=1, timestamp=274448</pre>
+<p><code>/auth_token</code> 前 37 字节（<code>od -An -tx1 -N37</code>）：</p>
+<pre>00 | 00 00 00 00 00 00 00 00 | c8 db e6 49 8e 82 c2 bb | 00*8 | 00 00 00 01 | 00 00 00 00 00 00 04 30 | ...
+    version  challenge(8)        user_id(8, 大端 = 0xc8dbe6498e82c2bb)      authType=1   timestamp(monotonic 274448 ms)</pre>
+<p>AOSP <code>hw_auth_token_t</code> 的<strong>全部多字节字段都是大端</strong>。Y73s 的 <code>unwrapSyntheticPasswordBlob()</code> 与我在 <code>Get_Tied_Profile_Password()</code> 里复制的解析，都只对 <code>authenticator_type</code>（ntohl）和 <code>timestamp</code>（8 项反转）做了转换，<code>challenge / userId / authenticatorId</code> 三个 64 位字段直接 <code>memcpy</code>。于是 <code>userId</code> 变成 <code>0xbbc2828e49e6dbc8</code>（= 13529519778211224520），正好是正确值的字节反转。</p>
+<p>AOSP <code>LockSettingsService.java:1555-1563</code> 对 <code>profile_key_name_decrypt_&lt;uid&gt;</code> 明确设置 <code>setUserAuthenticationRequired(true)</code> + <code>setUserAuthenticationValidityDurationSeconds(30)</code> + <code>setCriticalToDeviceEncryption(true)</code>。Keymaster 会拿 <code>authToken.userId</code> 与 key 的 <code>TAG_USER_SECURE_ID</code> 比对，字节序反了必然 <code>KEY_USER_NOT_AUTHENTICATED (-26)</code>。<strong>主用户 0 一直成功，是因为它的 SP key 不是 auth-bound，错误的 token 会被忽略</strong>（日志 <code>begin callback: error=0</code>）——这个 bug 直到碰到 auth-bound 的 profile key 才暴露。</p>
+<div class="block"><strong>修复（<code>patches/system_vold/0007</code> 一次性改两处）</strong>：
+<ul>
+  <li>上游 <code>unwrapSyntheticPasswordBlob()</code> 的解析：在 <code>hasAuthToken = true</code> 前用 <code>__builtin_bswap64</code> 转换三个 64 位字段（<code>#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__</code> 保护）。</li>
+  <li><code>Get_Tied_Profile_Password()</code> 自建的解析：整体改为 <code>bswap64/bswap32</code>（顺带修掉原先只有 7 项的 timestamp 反转），并打印 <code>y52s: corrected hw_auth_token byte order: userId=0x…</code> 便于真机确认。</li>
+  <li>顺带修正 helper 里 10 处 <code>printf</code> 误写成的字面 <code>\n</code>（此前日志粘连）。</li>
+</ul>
+本地严格补丁链预演全绿（BE 标记、SID bswap、tied helper、scrypt、owner fallback、括号配平、keymaster 链接、MTP 默认关）；CI 与验收脚本已同步新标记。提交 <code>b5f027c</code> → <strong>run <code>42751657966</code></strong>（03:47 UTC）。</div>
+
 <div class="foot">唯一入口：本文件。配置 <code>device/vivo/y52s/</code>，上游对照 <code>reference/</code>，
 证据 <code>device_dump/</code>，命令刷 <code>flash/</code>，TWRP 11 补丁 <code>patches/twrp11/</code>（存档），
 12.1 解密补丁 <code>patches/system_vold/</code>，CI 流水线 <code>build/{prepare_ci12_tree.py,apply_ci12_patches.sh,postprocess_ci12.py}</code>。未列出来源的参数保持 PENDING。</div>
