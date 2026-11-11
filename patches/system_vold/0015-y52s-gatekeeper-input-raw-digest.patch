@@ -52,10 +52,15 @@ Expected trace once this is right:
 ---
 --- a/Decrypt.cpp
 +++ b/Decrypt.cpp
-@@ -1108,6 +1108,37 @@
+@@ -1106,9 +1106,39 @@
+  *   v3: new SP800Derive(sp).withContext("sp-gk-authentication",
+  *           "android-synthetic-password-personalization-context")
   *   v2: personalisedHash("sp-gk-authentication", sp)
-  * Both label and context are AOSP constants.  The trap is the RETURN TYPE:
-  * vold's helpers hand back hex text, AOSP hands back bytes -- see below. */
+- * The v3 form is the same call that already produces this device's disk
+- * decryption key (PersonalizedHashSP800(FBE_KEY, CONTEXT, ...)), so only the
+- * label is new here; both label and context are AOSP constants. */
++ * Both label and context are AOSP constants.  The trap is the RETURN TYPE:
++ * vold's helpers hand back hex text, AOSP hands back bytes -- see below. */
 +/* vold's PersonalizedHashSP800()/PersonalizedHash() return the digest as a
 + * LOWERCASE HEX STRING, but gatekeeper wants the raw digest bytes: AOSP's
 + * SP800Derive.withContext() and personalizedHash() both return byte[].
@@ -90,7 +95,7 @@ Expected trace once this is right:
  static bool Y52s_Mint_Sid_Token(const userid_t owner_id, uint64_t want_sid,
  		std::string* token_out) {
  	if (g_y52s_sp.empty() || g_y52s_sp_user != owner_id) {
-@@ -1115,18 +1146,20 @@
+@@ -1116,18 +1146,20 @@
  		       (int)owner_id);
  		return false;
  	}
@@ -115,7 +120,7 @@ Expected trace once this is right:
  	std::vector<Y52sHandleCand> cands;
  	Y52s_Collect_Handles(&cands);
  	for (size_t i = 0; i < cands.size(); ++i) {
-@@ -1445,10 +1478,25 @@
+@@ -1446,10 +1478,25 @@
  		printf("y52s: key carries no USER_SECURE_ID, no token needed\n");
  	}
  	if (token_raw.empty() && want_sid != 0) {
