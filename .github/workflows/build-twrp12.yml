@@ -243,6 +243,10 @@ jobs:
               '0014 authorization dump with the masked tag id is missing'
           assert b'key demands auth but no SID was parsed' in d, \
               '0014 loud failure for a gated key without a parsed SID is missing'
+          assert b'y52s: sid token: gk input %zu bytes (v%d)' in d, \
+              '0015 derived gatekeeper input length is not reported'
+          assert b'/auth_token carries sid=0x%llx' in d, \
+              '0015 stale /auth_token must be rejected by SID'
           assert b'y52s: gatekeeper verify with' in d, \
               '0011 gatekeeper handle probing missing from ramdisk'
           assert b'pwd-embedded handle' in d, \

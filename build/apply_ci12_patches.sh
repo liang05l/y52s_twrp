@@ -32,6 +32,7 @@ P11="$REPO/patches/system_vold/0011-y52s-plaintext-gatekeeper-handle.patch"
 P12="$REPO/patches/system_vold/0012-y52s-tied-profile-token-from-key-sid.patch"
 P13="$REPO/patches/system_vold/0013-y52s-sid-token-from-synthetic-password.patch"
 P14="$REPO/patches/system_vold/0014-y52s-keymaster-tag-kind-mask.patch"
+P15="$REPO/patches/system_vold/0015-y52s-gatekeeper-input-raw-digest.patch"
 MTP="$REPO/patches/bootable_recovery_12.1/0001-y52s-mtp-default-off.patch"
 LINK="$REPO/patches/bootable_recovery_12.1/0002-y52s-keymaster-hidl-link.patch"
 
@@ -233,6 +234,29 @@ if grep -q 'if (tag == 502)' Decrypt.cpp && ! grep -q '0x0FFFFFFFu' Decrypt.cpp;
   fail "REGRESSION: raw tag compared to 502 without masking"
 fi
 echo "  0014 OK (tag ids 502/504/505 read with the kind nibble masked)"
+
+echo "  --- 0015 (gatekeeper wants the raw digest, not its hex text) ---"
+patch -p1 --dry-run -N < "$P15" >/dev/null || fail "0015 does not apply"
+patch -p1 -N -s < "$P15" || fail "0015 apply failed"
+grep -q 'Y52s_Hex_To_Bytes' Decrypt.cpp \
+  || fail "0015 missing: hex-to-bytes decoder for the gatekeeper input"
+grep -q 'y52s: sid token: gk input %zu bytes (v%d)' Decrypt.cpp \
+  || fail "0015 missing: derived gatekeeper input length is not reported"
+grep -q '/auth_token carries sid=0x%llx' Decrypt.cpp \
+  || fail "0015 missing: stale /auth_token is not rejected by SID"
+# The whole point of 0015 is that the hex text never reaches verify() again:
+# if the SP800 result is assigned to gk_input directly, the bug is back.
+if grep -q 'gk_input = PersonalizedHash' Decrypt.cpp; then
+  fail "REGRESSION: hex text assigned straight to the gatekeeper input"
+fi
+python3 - <<'EOF' || fail "0015 REGRESSION: SP-derived input is not hex-decoded"
+import sys
+src = open('Decrypt.cpp').read()
+dec = src.index('Y52s_Hex_To_Bytes(gk_hex, &gk_input)')
+derive = src.index('gk_hex = PersonalizedHashSP800')
+sys.exit(0 if derive < dec else 1)
+EOF
+echo "  0015 OK (SP800/personalizedHash hex decoded to the raw digest)"
 
 echo "=== bootable/recovery (MTP default off) ==="
 cd "$WORK/bootable/recovery"

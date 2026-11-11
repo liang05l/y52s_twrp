@@ -1,0 +1,147 @@
+From: y52s recovery work
+Subject: [PATCH] y52s: hand gatekeeper the raw digest, not its hex text
+
+Run 42866203274 put the masked tag parser on the device and it worked: the
+escrow key of app clone 999 now reports
+
+  y52s: tied-profile key requires sid=0x779b8423e32ee87 type=3 auth_timeout=30s
+
+so 0014 did its job -- the SID really is read out of the key now.  The next
+step, minting a token for that SID from the synthetic password, fails:
+
+  y52s: gk verify /data/system_de/0/spblob/0000000000000000.handle (uid 0):
+        sid=0x779b8423e32ee87 call_ok=1 code=-1 timeout=0 token=0
+  y52s: sid token: no enrolment accepted the synthetic password
+
+call_ok=1 proves the HAL was reached; code=-1 (ERROR_INVALID) means the
+secret did not match.  Both uid domains were tried (0 and 100000), so the
+domain is not the problem -- the secret is.
+
+The cause is a return-type mismatch.  AOSP's AuthenticationToken calls
+
+  new SP800Derive(sp).withContext("sp-gk-authentication",
+        "android-synthetic-password-personalization-context")
+
+which returns a 32-byte byte[].  vold's helper with the same name and the
+same HMAC construction returns the digest as a 64-character LOWERCASE HEX
+STRING (see HashPassword.cpp: sprintf("%02x")).  The token code passed that
+hex text to verify() as the password, so gatekeeper hashed 64 ASCII bytes
+that never existed on the device -- hence -1 every time.
+
+TWRP never noticed because its own FBE path uses the hex string directly as
+the disk key (and that path works), so the helper looks correct in isolation.
+The v2 branch had the identical bug: personalizedHash() also returns hex text
+while AOSP returns the 64-byte SHA-512 digest.
+
+Fix: decode the hex back to bytes before using it as the gatekeeper secret.
+Nothing else changes -- same label, same context, same SP, no hardcoded value,
+so this stays generic for every device that uses AOSP tied profiles.
+
+Second, smaller fix in the same code path: when minting fails, /auth_token was
+taken on faith.  On this device it held a stale token for sid=0xbbc2... which
+begin() can only reject with -26.  It is now accepted only when it actually
+carries the SID the key demands, and the log says why when it does not.
+
+Expected trace once this is right:
+
+  y52s: sid token: gk input 32 bytes (v3)
+  y52s: gk verify ...(uid 0): sid=0x779b8423e32ee87 call_ok=1 code=0 timeout=0 token=115
+  y52s: sid token: minted for sid=0x779b8423e32ee87 (user 0)
+  y52s: tied-profile credential recovered (80 bytes)
+
+---
+--- a/Decrypt.cpp
++++ b/Decrypt.cpp
+@@ -1108,6 +1108,37 @@
+  *   v2: personalisedHash("sp-gk-authentication", sp)
+  * Both label and context are AOSP constants.  The trap is the RETURN TYPE:
+  * vold's helpers hand back hex text, AOSP hands back bytes -- see below. */
++/* vold's PersonalizedHashSP800()/PersonalizedHash() return the digest as a
++ * LOWERCASE HEX STRING, but gatekeeper wants the raw digest bytes: AOSP's
++ * SP800Derive.withContext() and personalizedHash() both return byte[].
++ * Handing the 64-character hex text to verify() makes every enrolment answer
++ * -1 (ERROR_INVALID) -- exactly what the device log showed:
++ *
++ *   y52s: gk verify ...(uid 0): sid=0x779b8423e32ee87 call_ok=1 code=-1 timeout=0 token=0
++ *
++ * so convert the hex back to bytes before using it as the gatekeeper secret.
++ * The digest length is whatever the helper produced: 32 bytes (SHA-256) for
++ * v3, 64 bytes (SHA-512) for v2 -- both are what AOSP hands to gatekeeper. */
++static bool Y52s_Hex_To_Bytes(const std::string& hex, std::string* out) {
++	out->clear();
++	if (hex.empty() || (hex.size() % 2) != 0)
++		return false;
++	for (size_t i = 0; i < hex.size(); i += 2) {
++		const char h = hex[i], l = hex[i + 1];
++		int hi, lo;
++		if (h >= '0' && h <= '9') hi = h - '0';
++		else if (h >= 'a' && h <= 'f') hi = h - 'a' + 10;
++		else if (h >= 'A' && h <= 'F') hi = h - 'A' + 10;
++		else return false;
++		if (l >= '0' && l <= '9') lo = l - '0';
++		else if (l >= 'a' && l <= 'f') lo = l - 'a' + 10;
++		else if (l >= 'A' && l <= 'F') lo = l - 'A' + 10;
++		else return false;
++		out->push_back((char)((hi << 4) | lo));
++	}
++	return !out->empty();
++}
++
+ static bool Y52s_Mint_Sid_Token(const userid_t owner_id, uint64_t want_sid,
+ 		std::string* token_out) {
+ 	if (g_y52s_sp.empty() || g_y52s_sp_user != owner_id) {
+@@ -1115,18 +1146,20 @@
+ 		       (int)owner_id);
+ 		return false;
+ 	}
+-	std::string gk_input;
++	std::string gk_hex, gk_input;
+ 	if (g_y52s_sp_v3)
+-		gk_input = PersonalizedHashSP800("sp-gk-authentication",
++		gk_hex = PersonalizedHashSP800("sp-gk-authentication",
+ 				PERSONALISATION_CONTEXT, g_y52s_sp.data(),
+ 				(int)g_y52s_sp.size());
+ 	else
+-		gk_input = PersonalizedHash("sp-gk-authentication",
++		gk_hex = PersonalizedHash("sp-gk-authentication",
+ 				g_y52s_sp.data(), (int)g_y52s_sp.size());
+-	if (gk_input.empty()) {
++	if (!Y52s_Hex_To_Bytes(gk_hex, &gk_input)) {
+ 		printf("y52s: sid token: gatekeeper input derivation failed\n");
+ 		return false;
+ 	}
++	printf("y52s: sid token: gk input %zu bytes (v%d)\n",
++	       gk_input.size(), g_y52s_sp_v3 ? 3 : 2);
+ 	std::vector<Y52sHandleCand> cands;
+ 	Y52s_Collect_Handles(&cands);
+ 	for (size_t i = 0; i < cands.size(); ++i) {
+@@ -1445,10 +1478,25 @@
+ 		printf("y52s: key carries no USER_SECURE_ID, no token needed\n");
+ 	}
+ 	if (token_raw.empty() && want_sid != 0) {
+-		printf("y52s: minting failed, falling back to /auth_token\n");
+-		if (!android::base::ReadFileToString("/auth_token", &token_raw) ||
+-		    token_raw.size() < 69)
+-			token_raw.clear();
++		/* /auth_token is whatever the last gatekeeper verify left behind; it
++		 * is only usable if it actually carries the SID this key accepts.
++		 * On this device it held sid=0xbbc2... (a stale, unrelated token),
++		 * and feeding it to begin() can only return -26. */
++		std::string at;
++		if (android::base::ReadFileToString("/auth_token", &at) && at.size() >= 69) {
++			android::hardware::keymaster::V4_0::HardwareAuthToken probe = {};
++			if (Y52s_Parse_Token(at, &probe) && probe.userId == want_sid) {
++				token_raw = at;
++				printf("y52s: /auth_token carries the wanted sid=0x%llx\n",
++				       (unsigned long long)want_sid);
++			} else {
++				printf("y52s: /auth_token carries sid=0x%llx (type=%u), "
++				       "key wants 0x%llx - ignoring it\n",
++				       (unsigned long long)probe.userId,
++				       (unsigned)probe.authenticatorType,
++				       (unsigned long long)want_sid);
++			}
++		}
+ 	}
+ 
+ 	std::vector<uint8_t> nonce_vec(nonce.begin(), nonce.end());
