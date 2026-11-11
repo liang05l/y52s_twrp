@@ -247,6 +247,10 @@ jobs:
               '0015 derived gatekeeper input length is not reported'
           assert b'/auth_token carries sid=0x%llx' in d, \
               '0015 stale /auth_token must be rejected by SID'
+          assert b'y52s: synthetic password captured (%zu bytes, v%d)' in d, \
+              '0016 synthetic password capture inside the unwrap is missing'
+          assert b'y52s: synthetic password cached for user %d (%zu bytes, v%d)' in d, \
+              '0016 cached synthetic password length is not reported'
           assert b'y52s: gatekeeper verify with' in d, \
               '0011 gatekeeper handle probing missing from ramdisk'
           assert b'pwd-embedded handle' in d, \

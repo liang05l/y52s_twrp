@@ -33,6 +33,7 @@ P12="$REPO/patches/system_vold/0012-y52s-tied-profile-token-from-key-sid.patch"
 P13="$REPO/patches/system_vold/0013-y52s-sid-token-from-synthetic-password.patch"
 P14="$REPO/patches/system_vold/0014-y52s-keymaster-tag-kind-mask.patch"
 P15="$REPO/patches/system_vold/0015-y52s-gatekeeper-input-raw-digest.patch"
+P16="$REPO/patches/system_vold/0016-y52s-cache-the-synthetic-password.patch"
 MTP="$REPO/patches/bootable_recovery_12.1/0001-y52s-mtp-default-off.patch"
 LINK="$REPO/patches/bootable_recovery_12.1/0002-y52s-keymaster-hidl-link.patch"
 
@@ -257,6 +258,29 @@ derive = src.index('gk_hex = PersonalizedHashSP800')
 sys.exit(0 if derive < dec else 1)
 EOF
 echo "  0015 OK (SP800/personalizedHash hex decoded to the raw digest)"
+
+echo "  --- 0016 (cache the synthetic password, not the disk key made from it) ---"
+patch -p1 --dry-run -N < "$P16" >/dev/null || fail "0016 does not apply"
+patch -p1 -N -s < "$P16" || fail "0016 apply failed"
+grep -q 'g_y52s_sp_capture.assign((const char\*)secret_key' Decrypt.cpp \
+  || fail "0016 missing: synthetic password is not captured inside the unwrap"
+grep -q 'y52s: synthetic password captured (%zu bytes, v%d)' Decrypt.cpp \
+  || fail "0016 missing: captured synthetic password length is not reported"
+grep -q 'y52s: synthetic password cached for user %d (%zu bytes, v%d)' Decrypt.cpp \
+  || fail "0016 missing: cached synthetic password length is not reported"
+# The bug 0016 fixes: `secret` is the FBE disk key, so caching the return
+# value of unwrapSyntheticPasswordBlob() as the SP must never come back.
+if grep -q 'g_y52s_sp = secret;' Decrypt.cpp; then
+  fail "REGRESSION: the FBE disk key is cached as the synthetic password"
+fi
+python3 - <<'EOF' || fail "0016 REGRESSION: SP is captured after the FBE key is derived"
+import sys
+src = open('Decrypt.cpp').read()
+cap = src.index('g_y52s_sp_capture.assign')
+fbe = src.index('disk_decryption_secret_key = PersonalizedHashSP800(PERSONALIZATION_FBE_KEY')
+sys.exit(0 if cap < fbe else 1)
+EOF
+echo "  0016 OK (SP captured before the FBE derivation, adopted verbatim)"
 
 echo "=== bootable/recovery (MTP default off) ==="
 cd "$WORK/bootable/recovery"
